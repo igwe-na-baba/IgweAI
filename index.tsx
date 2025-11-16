@@ -1207,7 +1207,7 @@ const QuizGenerator = ({ onQuizGenerated, handleApiError }) => {
             For Fill-in-the-Blank questions, provide the blank word or phrase in the "answer" field.
             For True/False questions, the "answer" should be either "True" or "False". The question should be a declarative statement.
             For Ordering questions, provide a list of "items" to be ordered, and the "answer" should be an array with the items in the correct order.
-            For Match the Pairs questions, provide a list of "premises" and a list of "options". The "answer" should be a JSON formatted string of an object that maps each premise to its correct option.
+            For Match the Pairs questions, provide a list of "premises" and a list of "options". The "answer" must be a single string, with each correct pair on a new line, formatted exactly as 'premise /// option'.
             For Image-Based questions, provide an AI image generation prompt in the "imagePrompt" field related to the question. The question should then ask to identify or describe something in the potential image. Do not generate an image, just the prompt for it.
             Return the output as a JSON object with a key "quiz" which is an array of question objects.
             Each question object must have:
@@ -1216,7 +1216,7 @@ const QuizGenerator = ({ onQuizGenerated, handleApiError }) => {
             3. "options": An array of strings (for Multiple-Choice and Match the Pairs).
             4. "premises": An array of strings (for Match the Pairs only).
             5. "items": An array of strings (for Ordering only).
-            6. "answer": The correct answer. For Multiple-Choice, this is the string of the correct option. For Fill-in-the-Blank, it's the missing word/phrase. For Ordering, it's an array of items in the correct sequence. For Match the Pairs, this is a JSON string representing an object mapping premises to options.
+            6. "answer": The correct answer. For Multiple-Choice, this is the string of the correct option. For Fill-in-the-Blank, it's the missing word/phrase. For Ordering, it's an array of items in the correct sequence. For Match the Pairs, this is a single multi-line string with each pair formatted as 'premise /// option'.
             7. "imagePrompt": A string for the image generation AI (for Image-Based only).
             Do not include any extra text or markdown formatting in your response.`;
             
@@ -1858,12 +1858,21 @@ const ExamReview = ({ results, quiz, handleApiError }) => {
         if (questionType === 'Match the Pairs') {
             let answerObj = answer;
             if (typeof answer === 'string') {
+                // This is the correct answer from the model. Parse it.
                 try {
-                    answerObj = JSON.parse(answer);
+                    const parsedObj = {};
+                    answer.split('\n').forEach(line => {
+                        const parts = line.split(' /// ');
+                        if(parts.length === 2) {
+                            parsedObj[parts[0].trim()] = parts[1].trim();
+                        }
+                    });
+                    answerObj = parsedObj;
                 } catch (e) {
-                    return answer; // Not a valid JSON string, display as is.
+                    return answer; // Not parseable, display as is.
                 }
             }
+             // User answer is already an object
             if (typeof answerObj === 'object' && answerObj !== null) {
                 return Object.entries(answerObj).map(([key, val]) => <div key={key}>{key}: {val as string}</div>);
             }
@@ -2197,7 +2206,15 @@ const App = () => {
                     isCorrect = false;
                 } else {
                     try {
-                        const correctAnswerObj = JSON.parse(q.answer as string);
+                        const correctAnswerObj = {};
+                        const pairs = (q.answer as string).split('\n');
+                        for (const pair of pairs) {
+                            const parts = pair.split(' /// ');
+                            if (parts.length === 2) {
+                                correctAnswerObj[parts[0].trim()] = parts[1].trim();
+                            }
+                        }
+
                         const correctKeys = Object.keys(correctAnswerObj);
                         const userKeys = Object.keys(userAnswerObj);
 
@@ -2207,7 +2224,7 @@ const App = () => {
                             isCorrect = correctKeys.every(key => correctAnswerObj[key] === userAnswerObj[key]);
                         }
                     } catch (e) {
-                        console.error("Failed to parse correct answer for Match the Pairs:", q.answer);
+                        console.error("Failed to parse or compare answer for Match the Pairs:", q.answer, e);
                         isCorrect = false;
                     }
                 }
