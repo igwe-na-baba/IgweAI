@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import ReactDOM from 'react-dom/client';
-import { GoogleGenAI, Type, Modality, Blob, Chat } from "@google/genai";
+import { GoogleGenAI, Type, Modality, Chat } from "@google/genai";
 import html2canvas from 'html2canvas';
 
 
@@ -57,6 +57,20 @@ function createBlob(data) {
   };
 }
 
+const formatDuration = (totalSeconds) => {
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = Math.floor(totalSeconds % 60);
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+};
+
+const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result.toString().split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+});
+
+
 const renderMessageWithPronunciations = (text) => {
     if (!text || !text.includes('[')) return text;
     const regex = /\[([^\]]+)\]\(([^)]+)\)/g;
@@ -90,6 +104,64 @@ const renderMessageWithPronunciations = (text) => {
     
     // Use React.Fragment to group elements
     return elements.length > 0 ? <>{elements}</> : text;
+};
+
+const AudioMessageBubble = ({ audio }) => {
+    const audioRef = useRef(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [progress, setProgress] = useState(0);
+
+    const togglePlay = (e) => {
+        e.stopPropagation();
+        if (audioRef.current.paused) {
+            audioRef.current.play();
+        } else {
+            audioRef.current.pause();
+        }
+    };
+    
+    useEffect(() => {
+        const audioEl = audioRef.current;
+        if (!audioEl) return;
+        
+        const handlePlay = () => setIsPlaying(true);
+        const handlePause = () => setIsPlaying(false);
+        const handleTimeUpdate = () => {
+            if (audioEl.duration > 0) {
+                setProgress((audioEl.currentTime / audioEl.duration) * 100);
+            }
+        };
+        const handleEnded = () => {
+            setIsPlaying(false);
+            setProgress(0);
+        };
+        
+        audioEl.addEventListener('play', handlePlay);
+        audioEl.addEventListener('pause', handlePause);
+        audioEl.addEventListener('timeupdate', handleTimeUpdate);
+        audioEl.addEventListener('ended', handleEnded);
+        
+        return () => {
+            audioEl.removeEventListener('play', handlePlay);
+            audioEl.removeEventListener('pause', handlePause);
+            audioEl.removeEventListener('timeupdate', handleTimeUpdate);
+            audioEl.removeEventListener('ended', handleEnded);
+        }
+    }, []);
+
+    return (
+        <div className="message-bubble audio-bubble">
+            <audio ref={audioRef} src={audio.url} preload="metadata"></audio>
+            <button onClick={togglePlay} className="play-pause-btn-bubble">
+                <i className={`fas ${isPlaying ? 'fa-pause' : 'fa-play'}`}></i>
+            </button>
+            <div className="audio-progress-bar">
+                <div className="audio-progress-dot" style={{ left: `calc(${progress}% - 4px)` }}></div>
+                <div className="audio-progress" style={{ width: `${progress}%` }}></div>
+            </div>
+            <span className="audio-duration-bubble">{formatDuration(audio.duration || 0)}</span>
+        </div>
+    );
 };
 
 const Certificate = ({ title, name, topic, onDownload, handleApiError }) => {
@@ -457,9 +529,9 @@ const ContactInfo = () => (
         <p><i className="fas fa-envelope"></i> support@nexuslearn.ai</p>
         <p><i className="fas fa-phone"></i> +1 (555) CYBER-01</p>
         <div className="social-icons">
-             <a href="#" aria-label="LinkedIn Profile" target="_blank" rel="noopener noreferrer"><i className="fab fa-linkedin"></i></a>
-             <a href="#" aria-label="GitHub Repository" target="_blank" rel="noopener noreferrer"><i className="fab fa-github"></i></a>
-             <a href="#" aria-label="Twitter Page" target="_blank" rel="noopener noreferrer"><i className="fab fa-twitter"></i></a>
+             <a href="https://www.linkedin.com/in/nwaiwu-chibuzor" aria-label="LinkedIn Profile" target="_blank" rel="noopener noreferrer"><i className="fab fa-linkedin"></i></a>
+             <a href="https://github.com/c-nwaiwu" aria-label="GitHub Repository" target="_blank" rel="noopener noreferrer"><i className="fab fa-github"></i></a>
+             <a href="https://x.com/nwaiwu_codes" aria-label="Twitter Page" target="_blank" rel="noopener noreferrer"><i className="fab fa-twitter"></i></a>
         </div>
     </div>
 );
@@ -537,6 +609,10 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
     const [transcriptionHistory, setTranscriptionHistory] = useState([]);
     const [inputText, setInputText] = useState('');
     const [copiedMessageIndex, setCopiedMessageIndex] = useState(null);
+    const [chatMode, setChatMode] = useState('live'); // 'live' or 'message'
+    const [recordingStatus, setRecordingStatus] = useState('idle'); // 'idle', 'recording', 'recorded'
+    const [recordedAudio, setRecordedAudio] = useState(null); // { url: string, blob: Blob, duration: number }
+    const [recordingDuration, setRecordingDuration] = useState(0);
     
     const sessionPromiseRef = useRef(null);
     const inputAudioContextRef = useRef(null);
@@ -547,6 +623,9 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
     const sourcesRef = useRef(new Set());
     const nextStartTimeRef = useRef(0);
     const textareaRef = useRef(null);
+    const mediaRecorderRef = useRef(null);
+    const audioChunksRef = useRef([]);
+    const recordingIntervalRef = useRef(null);
     
     const currentInputTranscriptionRef = useRef('');
     const currentOutputTranscriptionRef = useRef('');
@@ -629,7 +708,7 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
             const chatHistory = history
-                .filter(item => item.text)
+                .filter(item => item.text && !item.audio)
                 .map(item => ({
                     role: item.speaker === 'user' ? 'user' : 'model',
                     parts: [{ text: item.text }]
@@ -692,7 +771,7 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
                             setTranscriptionHistory(prev => {
                                 const newHistory = [...prev];
                                 const last = newHistory[newHistory.length - 1];
-                                if (last?.speaker === 'user') {
+                                if (last?.speaker === 'user' && !last.audio) {
                                     last.text = currentInputTranscriptionRef.current;
                                     return newHistory;
                                 }
@@ -779,6 +858,18 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
             setStatus('ERROR');
         }
     };
+    
+    const handleDiscardRecording = () => {
+        if (recordedAudio) {
+            URL.revokeObjectURL(recordedAudio.url);
+        }
+        setRecordedAudio(null);
+        setRecordingStatus('idle');
+        setRecordingDuration(0);
+        if (recordingIntervalRef.current) {
+            clearInterval(recordingIntervalRef.current);
+        }
+    };
 
     const deactivate = () => {
         if (sessionPromiseRef.current) {
@@ -835,6 +926,101 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
         sendTextMessage(message, transcriptionHistory);
         setInputText('');
     };
+    
+    const startRecording = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorderRef.current = new MediaRecorder(stream);
+            audioChunksRef.current = [];
+
+            mediaRecorderRef.current.ondataavailable = event => {
+                audioChunksRef.current.push(event.data);
+            };
+
+            mediaRecorderRef.current.onstop = () => {
+                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                setRecordedAudio({ url: audioUrl, blob: audioBlob, duration: recordingDuration });
+                setRecordingStatus('recorded');
+                stream.getTracks().forEach(track => track.stop());
+            };
+
+            setRecordingStatus('recording');
+            setRecordingDuration(0);
+            mediaRecorderRef.current.start();
+            recordingIntervalRef.current = setInterval(() => {
+                setRecordingDuration(prev => prev + 1);
+            }, 1000);
+        } catch (err) {
+            console.error("Error starting recording:", err);
+            handleApiError(new Error("Microphone access was denied. Please enable it in your browser settings."));
+        }
+    };
+
+    const stopRecording = () => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+            mediaRecorderRef.current.stop();
+            clearInterval(recordingIntervalRef.current);
+            setRecordingStatus('idle');
+        }
+    };
+    
+    const handleSendVoiceMessage = async () => {
+        if (!recordedAudio) return;
+
+        setStatus('THINKING');
+        const apiHistory = transcriptionHistory;
+        setTranscriptionHistory(prev => [...prev, {
+            speaker: 'user',
+            audio: { url: recordedAudio.url, duration: recordedAudio.duration },
+            text: `[Voice Message]`,
+        }]);
+        
+        try {
+            const base64Audio = await blobToBase64(recordedAudio.blob);
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            
+            const historyForApi = apiHistory
+                .filter(item => item.text && !item.audio)
+                .map(item => ({
+                    role: item.speaker === 'user' ? 'user' : 'model',
+                    parts: [{ text: item.text }]
+                }));
+
+            const newUserMessage = {
+                role: 'user',
+                parts: [
+                    { inlineData: { mimeType: recordedAudio.blob.type, data: base64Audio } },
+                    { text: 'Listen to this voice message from a user. Please provide a helpful, concise response to their query.' }
+                ]
+            };
+            
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-pro',
+                contents: [...historyForApi, newUserMessage],
+                config: { systemInstruction }
+            });
+
+            const modelResponseText = response.text;
+            
+            setTranscriptionHistory(prev => [...prev, { speaker: 'model', text: modelResponseText }]);
+            await playTextAsAudio(modelResponseText, () => setStatus('IDLE'));
+
+        } catch (error) {
+            console.error("Voice message failed:", error);
+            handleApiError(error);
+            setStatus('ERROR');
+        } finally {
+            handleDiscardRecording();
+        }
+    };
+
+    const handleModeChange = (newMode) => {
+        if (chatMode === newMode) return;
+        deactivate();
+        handleDiscardRecording();
+        setChatMode(newMode);
+    };
 
     const handleKeyDown = (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -845,7 +1031,7 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
     
     useEffect(() => {
         return () => {
-            if(status !== 'IDLE') {
+            if (sessionPromiseRef.current) {
                 deactivate();
             }
         };
@@ -873,14 +1059,14 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
                         <div className="chat-message-wrapper model">
                             <div className="chat-message model">
                                 <div className="message-bubble">
-                                    Hello! I am Oracle, your personal cybersecurity expert. Press the microphone or type a message to begin our session. How can I assist you today?
+                                    Hello! I am Oracle, your personal cybersecurity expert. Use "Live Conversation" for real-time chat, or switch to "Voice Message" to record and send audio clips. How can I assist you?
                                 </div>
                             </div>
                         </div>
                     )}
                     {transcriptionHistory.map((item, index) => (
                         <div key={index} className={`chat-message-wrapper ${item.speaker}`}>
-                             {item.speaker === 'user' && (
+                             {item.speaker === 'user' && item.text && !item.audio && (
                                 <button
                                     className={`copy-to-clipboard-btn ${copiedMessageIndex === index ? 'copied' : ''}`}
                                     onClick={() => handleCopyToClipboard(item.text, index)}
@@ -891,7 +1077,11 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
                                 </button>
                             )}
                             <div className={`chat-message ${item.speaker}`}>
-                                <div className="message-bubble">{item.text ? renderMessageWithPronunciations(item.text) : '...'}</div>
+                               {item.audio ? (
+                                    <AudioMessageBubble audio={item.audio} />
+                                ) : (
+                                    <div className="message-bubble">{item.text ? renderMessageWithPronunciations(item.text) : '...'}</div>
+                                )}
                             </div>
                             {item.speaker === 'model' && (
                                 <button
@@ -906,40 +1096,76 @@ const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
                         </div>
                     ))}
                      {status === 'THINKING' && (
-                        <div className="chat-message model">
-                            <div className="message-bubble typing-indicator">
-                                <span></span><span></span><span></span>
+                        <div className="chat-message-wrapper model">
+                             <div className="chat-message model">
+                                <div className="message-bubble typing-indicator">
+                                    <span></span><span></span><span></span>
+                                </div>
                             </div>
                         </div>
                     )}
                 </div>
                 <div className="cyber-chatbot-controls">
-                    <button 
-                        className={`activate-button ${status !== 'IDLE' && status !== 'ERROR' ? 'active' : ''} ${isPulsating ? 'pulsating' : ''}`}
-                        onClick={handleToggleSession}
-                        aria-label={status === 'IDLE' ? "Activate Voice Session" : "Deactivate Voice Session"}
-                    >
-                        {status === 'CONNECTING' ? <div className="mini-spinner"></div> : <i className="fas fa-microphone"></i>}
-                    </button>
-                     <form onSubmit={handleTextSubmit} className="text-input-form">
-                        <textarea
-                            ref={textareaRef}
-                            value={inputText}
-                            onChange={(e) => setInputText(e.target.value)}
-                            onKeyDown={handleKeyDown}
-                            placeholder="Or type your message..."
-                            rows="1"
-                            aria-label="Chat message input"
-                            disabled={status === 'SPEAKING' || status === 'THINKING' || status === 'CONNECTING' }
-                        />
-                        <button 
-                            type="submit" 
-                            aria-label="Send Message" 
-                            disabled={!inputText.trim() || status === 'SPEAKING' || status === 'THINKING' || status === 'CONNECTING'}
-                        >
-                            <i className="fas fa-paper-plane"></i>
+                     <div className="chatbot-mode-switcher">
+                        <button className={chatMode === 'live' ? 'active' : ''} onClick={() => handleModeChange('live')}>
+                            <i className="fas fa-satellite-dish"></i> Live
                         </button>
-                    </form>
+                        <button className={chatMode === 'message' ? 'active' : ''} onClick={() => handleModeChange('message')}>
+                             <i className="fas fa-microphone-alt"></i> Message
+                        </button>
+                    </div>
+                    {chatMode === 'live' && (
+                         <>
+                            <button 
+                                className={`activate-button ${status !== 'IDLE' && status !== 'ERROR' ? 'active' : ''} ${isPulsating ? 'pulsating' : ''}`}
+                                onClick={handleToggleSession}
+                                aria-label={status === 'IDLE' ? "Activate Voice Session" : "Deactivate Voice Session"}
+                            >
+                                {status === 'CONNECTING' ? <div className="mini-spinner"></div> : <i className="fas fa-microphone"></i>}
+                            </button>
+                             <form onSubmit={handleTextSubmit} className="text-input-form">
+                                <textarea
+                                    ref={textareaRef}
+                                    value={inputText}
+                                    onChange={(e) => setInputText(e.target.value)}
+                                    onKeyDown={handleKeyDown}
+                                    placeholder="Or type your message..."
+                                    rows="1"
+                                    aria-label="Chat message input"
+                                    disabled={status === 'SPEAKING' || status === 'THINKING' || status === 'CONNECTING' }
+                                />
+                                <button 
+                                    type="submit" 
+                                    aria-label="Send Message" 
+                                    disabled={!inputText.trim() || status === 'SPEAKING' || status === 'THINKING' || status === 'CONNECTING'}
+                                >
+                                    <i className="fas fa-paper-plane"></i>
+                                </button>
+                            </form>
+                        </>
+                    )}
+                    {chatMode === 'message' && (
+                        <div className="voice-message-controls">
+                            {recordingStatus === 'recorded' && recordedAudio ? (
+                                <div className="recorded-audio-player">
+                                    <button onClick={handleDiscardRecording} className="discard-btn" aria-label="Discard recording"><i className="fas fa-trash"></i></button>
+                                    <AudioMessageBubble audio={recordedAudio} />
+                                    <button onClick={handleSendVoiceMessage} className="send-voice-btn" aria-label="Send voice message"><i className="fas fa-paper-plane"></i></button>
+                                </div>
+                            ) : (
+                                <>
+                                <button 
+                                    className={`record-button ${recordingStatus === 'recording' ? 'recording' : ''}`}
+                                    onClick={recordingStatus === 'recording' ? stopRecording : startRecording}
+                                    aria-label={recordingStatus === 'recording' ? 'Stop recording' : 'Start recording'}
+                                >
+                                    <i className={`fas fa-2x ${recordingStatus === 'recording' ? 'fa-stop' : 'fa-microphone'}`}></i>
+                                </button>
+                                {recordingStatus === 'recording' && <span className="recording-timer">{formatDuration(recordingDuration)}</span>}
+                                </>
+                            )}
+                        </div>
+                    )}
                 </div>
             </div>
         </div>
@@ -1322,12 +1548,34 @@ const ChallengeQuestView = ({ quest, onComplete, onBack, handleApiError }) => {
     const audioContextRef = useRef(null);
     const audioQueueRef = useRef([]);
     const isPlayingRef = useRef(false);
+    const audioSourceRef = useRef(null);
+    const isMountedRef = useRef(true);
     const questSteps = quest?.steps || [];
+
+    useEffect(() => {
+        isMountedRef.current = true;
+        // Cleanup function to run when the component unmounts
+        return () => {
+            isMountedRef.current = false;
+            // Stop any playing audio source to prevent it from continuing after unmount
+            if (audioSourceRef.current) {
+                try {
+                    audioSourceRef.current.stop();
+                } catch (e) {
+                    console.warn("Could not stop audio source on unmount:", e);
+                }
+            }
+            // Close the audio context to release system resources
+            if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+                audioContextRef.current.close();
+            }
+        };
+    }, []);
 
      useEffect(() => {
         if (phase === 'briefing') {
             const timer = setTimeout(() => {
-                setCurrentStepIndex(0);
+                if (isMountedRef.current) setCurrentStepIndex(0);
             }, 500);
             return () => clearTimeout(timer);
         }
@@ -1342,14 +1590,15 @@ const ChallengeQuestView = ({ quest, onComplete, onBack, handleApiError }) => {
 
     const playText = async (text) => {
         audioQueueRef.current.push(text);
-        if (isPlayingRef.current) return;
+        if (isPlayingRef.current || !isMountedRef.current) return;
         
         isPlayingRef.current = true;
         setIsSpeaking(true);
         
-        if (!audioContextRef.current) {
-            // FIX: Cast window to any to access webkitAudioContext for older browser compatibility.
+        if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
             audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        } else if (audioContextRef.current.state === 'suspended') {
+            audioContextRef.current.resume();
         }
 
         while(audioQueueRef.current.length > 0) {
@@ -1369,6 +1618,8 @@ const ChallengeQuestView = ({ quest, onComplete, onBack, handleApiError }) => {
                     },
                 });
                 
+                if (!isMountedRef.current) return;
+                
                 const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
                 if (base64Audio) {
                     const audioBuffer = await decodeAudioData(
@@ -1378,17 +1629,21 @@ const ChallengeQuestView = ({ quest, onComplete, onBack, handleApiError }) => {
                         1,
                     );
                     const source = audioContextRef.current.createBufferSource();
+                    audioSourceRef.current = source;
                     source.buffer = audioBuffer;
                     source.connect(audioContextRef.current.destination);
                     
-                    // FIX: Specify Promise type as <void> to correctly handle resolve() with no arguments.
                     await new Promise<void>(resolve => {
                         source.onended = () => {
+                            audioSourceRef.current = null;
+                            if (!isMountedRef.current) return resolve();
+                            
                             if (currentStepIndex < questSteps.length - 1) {
                                 setCurrentStepIndex(i => i + 1);
                             } else {
-                                // Last step finished, move to challenge
-                                setTimeout(() => setPhase('challenge'), 1000);
+                                setTimeout(() => {
+                                    if (isMountedRef.current) setPhase('challenge');
+                                }, 1000);
                             }
                             resolve();
                         };
@@ -1396,17 +1651,20 @@ const ChallengeQuestView = ({ quest, onComplete, onBack, handleApiError }) => {
                     });
                 }
             } catch (error) {
+                if (!isMountedRef.current) return;
                 console.error('TTS failed:', error);
                 handleApiError(error);
-                // On TTS error, just reveal the steps visually
                  if (currentStepIndex < questSteps.length - 1) {
                     setCurrentStepIndex(i => i + 1);
                 } else {
-                    setTimeout(() => setPhase('challenge'), 1000);
+                    setTimeout(() => {
+                        if (isMountedRef.current) setPhase('challenge');
+                    }, 1000);
                 }
             }
         }
         
+        if (!isMountedRef.current) return;
         isPlayingRef.current = false;
         setIsSpeaking(false);
     };
@@ -1435,14 +1693,16 @@ const ChallengeQuestView = ({ quest, onComplete, onBack, handleApiError }) => {
                 model: 'gemini-2.5-flash',
                 contents: prompt,
             });
-            setDebriefing(response.text);
+            if (isMountedRef.current) setDebriefing(response.text);
 
         } catch (error) {
             console.error("Debriefing generation failed:", error);
-            handleApiError(error);
-            setDebriefing("Failed to generate debriefing. Please check the console for errors.");
+            if (isMountedRef.current) {
+                handleApiError(error);
+                setDebriefing("Failed to generate debriefing. Please check the console for errors.");
+            }
         } finally {
-            setIsLoading(false);
+            if (isMountedRef.current) setIsLoading(false);
         }
     };
 
@@ -1839,9 +2099,9 @@ const Footer = ({ setView, handleNavigateToContact, openPrivacyModal }) => (
                 <h3>Follow Us</h3>
                 <p>Stay updated with the latest in cybersecurity education.</p>
                 <div className="social-icons">
-                    <a href="#" aria-label="LinkedIn Profile" target="_blank" rel="noopener noreferrer"><i className="fab fa-linkedin"></i></a>
-                    <a href="#" aria-label="GitHub Repository" target="_blank" rel="noopener noreferrer"><i className="fab fa-github"></i></a>
-                    <a href="#" aria-label="Twitter Page" target="_blank" rel="noopener noreferrer"><i className="fab fa-twitter"></i></a>
+                    <a href="https://www.linkedin.com/in/nwaiwu-chibuzor" aria-label="LinkedIn Profile" target="_blank" rel="noopener noreferrer"><i className="fab fa-linkedin"></i></a>
+                    <a href="https://github.com/c-nwaiwu" aria-label="GitHub Repository" target="_blank" rel="noopener noreferrer"><i className="fab fa-github"></i></a>
+                    <a href="https://x.com/nwaiwu_codes" aria-label="Twitter Page" target="_blank" rel="noopener noreferrer"><i className="fab fa-twitter"></i></a>
                 </div>
             </div>
         </div>
@@ -1898,7 +2158,11 @@ const App = () => {
     };
 
     const handleQuizGenerated = (generatedQuiz) => {
-        setQuiz(generatedQuiz);
+        const normalizedQuiz = {
+            questions: generatedQuiz.quiz || [],
+            topic: generatedQuiz.topic,
+        };
+        setQuiz(normalizedQuiz);
         setView('exam_start');
     };
     
