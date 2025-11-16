@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import ReactDOM from 'react-dom/client';
-import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { GoogleGenAI, Type, Modality, Blob, Chat } from "@google/genai";
 import html2canvas from 'html2canvas';
 
 
@@ -15,6 +15,16 @@ function decode(base64) {
     }
     return bytes;
 }
+
+function encode(bytes) {
+  let binary = '';
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 
 async function decodeAudioData(
     data,
@@ -35,38 +45,84 @@ async function decodeAudioData(
     return buffer;
 }
 
+function createBlob(data) {
+  const l = data.length;
+  const int16 = new Int16Array(l);
+  for (let i = 0; i < l; i++) {
+    int16[i] = data[i] * 32768;
+  }
+  return {
+    data: encode(new Uint8Array(int16.buffer)),
+    mimeType: 'audio/pcm;rate=16000',
+  };
+}
 
-const Certificate = ({ name, topic, onDownload, handleApiError }) => {
+const renderMessageWithPronunciations = (text) => {
+    if (!text || !text.includes('[')) return text;
+    const regex = /\[([^\]]+)\]\(([^)]+)\)/g;
+    const elements = [];
+    let lastIndex = 0;
+    
+    // Using for...of loop for matchAll iterator
+    for (const match of text.matchAll(regex)) {
+        const [fullMatch, term, pronunciation] = match;
+        const matchIndex = match.index;
+        
+        // Add text before the match
+        if (matchIndex > lastIndex) {
+            elements.push(text.substring(lastIndex, matchIndex));
+        }
+        
+        // Add the styled term with tooltip
+        elements.push(
+            <span key={matchIndex} className="technical-term" data-pronunciation={pronunciation}>
+                {term}
+            </span>
+        );
+        
+        lastIndex = matchIndex + fullMatch.length;
+    }
+    
+    // Add any remaining text after the last match
+    if (lastIndex < text.length) {
+        elements.push(text.substring(lastIndex));
+    }
+    
+    // Use React.Fragment to group elements
+    return elements.length > 0 ? <>{elements}</> : text;
+};
+
+const Certificate = ({ title, name, topic, onDownload, handleApiError }) => {
     const [backgroundImage, setBackgroundImage] = useState('');
     const [isBgLoading, setIsBgLoading] = useState(true);
     const [enhancedTopic, setEnhancedTopic] = useState('');
     const [isTopicLoading, setIsTopicLoading] = useState(true);
 
-    useEffect(() => {
-        const generateBgImage = async () => {
-            setIsBgLoading(true);
-            try {
-                const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-                const response = await ai.models.generateImages({
-                    model: 'imagen-4.0-generate-001',
-                    prompt: 'An elegant, professional certificate background with subtle, abstract patterns inspired by digital networks and glowing green circuits. A sophisticated green and dark gray color palette, high resolution, formal, academic aesthetic.',
-                    config: {
-                      numberOfImages: 1,
-                      outputMimeType: 'image/jpeg'
-                    }
-                });
-                const base64ImageBytes = response.generatedImages[0].image.imageBytes;
-                const imageUrl = `data:image/jpeg;base64,${base64ImageBytes}`;
-                setBackgroundImage(imageUrl);
-            } catch (error) {
-                console.error("Certificate background generation failed:", error);
-                handleApiError(error);
-                // On error, we'll just fall back to the CSS background
-            } finally {
-                setIsBgLoading(false);
-            }
-        };
+    const generateBgImage = async () => {
+        setIsBgLoading(true);
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            const response = await ai.models.generateImages({
+                model: 'imagen-4.0-generate-001',
+                prompt: 'An elegant, professional certificate background with subtle, abstract patterns inspired by digital networks and glowing green circuits. A sophisticated green and dark gray color palette, high resolution, formal, academic aesthetic.',
+                config: {
+                  numberOfImages: 1,
+                  outputMimeType: 'image/jpeg'
+                }
+            });
+            const base64ImageBytes = response.generatedImages[0].image.imageBytes;
+            const imageUrl = `data:image/jpeg;base64,${base64ImageBytes}`;
+            setBackgroundImage(imageUrl);
+        } catch (error) {
+            console.error("Certificate background generation failed:", error);
+            handleApiError(error);
+            // On error, we'll just fall back to the CSS background
+        } finally {
+            setIsBgLoading(false);
+        }
+    };
 
+    useEffect(() => {
         generateBgImage();
     }, []);
 
@@ -115,7 +171,7 @@ const Certificate = ({ name, topic, onDownload, handleApiError }) => {
                 )}
 
                 <div className="certificate-v2-header cert-anim-1">
-                    <h1 className="cert-title">Certificate of Achievement</h1>
+                    <h1 className="cert-title">{title || 'Certificate of Achievement'}</h1>
                     <p className="cert-subtitle">This certificate is proudly presented to</p>
                 </div>
                 <div className="certificate-v2-body">
@@ -157,9 +213,17 @@ const Certificate = ({ name, topic, onDownload, handleApiError }) => {
                 </div>
                  <div className="cert-id cert-anim-7">Certificate ID: {certificateId}</div>
             </div>
-            <button onClick={onDownload} className="download-cert-btn">
-                <span role="img" aria-label="download">📥</span> Download Certificate
-            </button>
+            <div className="certificate-actions">
+                <button onClick={onDownload} className="download-cert-btn">
+                    <span role="img" aria-label="download">📥</span> Download as PNG
+                </button>
+                <button onClick={generateBgImage} className="regenerate-bg-btn" disabled={isBgLoading}>
+                    {isBgLoading ? 
+                        <><div className="mini-spinner"></div> Regenerating...</> : 
+                        <><span role="img" aria-label="regenerate">🔄</span> Regenerate Background</>
+                    }
+                </button>
+            </div>
         </div>
     );
 };
@@ -167,7 +231,7 @@ const MatchThePairsQuestion = ({ q, qIndex, userAnswer, onAnswerChange }) => {
     const [activePremise, setActivePremise] = useState(null);
 
     // Memoize shuffled options to prevent re-shuffling on every render
-    const shuffledOptions = useMemo(() => [...q.options].sort(() => Math.random() - 0.5), [q.options]);
+    const shuffledOptions = useMemo(() => [...(q.options || [])].sort(() => Math.random() - 0.5), [q.options]);
 
     const currentAnswers = userAnswer || {};
     const matchedOptions = Object.values(currentAnswers);
@@ -199,7 +263,7 @@ const MatchThePairsQuestion = ({ q, qIndex, userAnswer, onAnswerChange }) => {
     return (
         <div className="match-pairs-container">
             <div className="match-column">
-                {q.premises.map((premise, pIndex) => (
+                {(q.premises || []).map((premise, pIndex) => (
                     <button
                         type="button"
                         key={pIndex}
@@ -237,7 +301,7 @@ const OrderingQuestion = ({ q, qIndex, userAnswer, onAnswerChange }) => {
             return userAnswer;
         }
         // Create a new array to avoid mutating the original question object
-        return [...q.items].sort(() => Math.random() - 0.5);
+        return [...(q.items || [])].sort(() => Math.random() - 0.5);
     }, []); // Only run once when the component mounts
 
     const [items, setItems] = useState(initialItems);
@@ -315,17 +379,30 @@ const QuizSkeleton = () => (
 
 const CreatorProfile = () => {
     const [profilePicture, setProfilePicture] = useState("https://i.ibb.co/6wmz62v/Sir-Iyke-Profile.png");
+    const [error, setError] = useState(null);
     const fileInputRef = useRef(null);
 
     const handleImageChange = (e) => {
         const file = e.target.files[0];
-        if (file && file.type.startsWith('image/')) {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                setProfilePicture(reader.result as string);
-            };
-            reader.readAsDataURL(file);
+        setError(null);
+
+        if (!file) return;
+
+        // Validation
+        if (!file.type.startsWith('image/')) {
+            setError('Invalid file type. Please select an image.');
+            return;
         }
+        if (file.size > 2 * 1024 * 1024) { // 2MB limit
+            setError('File is too large. Please select an image under 2MB.');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            setProfilePicture(reader.result as string);
+        };
+        reader.readAsDataURL(file);
     };
 
     const handleUploadClick = () => {
@@ -344,9 +421,11 @@ const CreatorProfile = () => {
                 type="file"
                 ref={fileInputRef}
                 onChange={handleImageChange}
-                accept="image/*"
+                accept="image/png, image/jpeg, image/gif"
                 style={{ display: 'none' }}
+                aria-label="Upload profile picture"
             />
+             {error && <p className="profile-upload-error">{error}</p>}
             <div className="profile-info">
                 <h3>Nwaiwu Chibuzor .I.</h3>
                 <p>Full-Stack Developer & AI Architect</p>
@@ -362,15 +441,11 @@ const Testimonials = () => (
     <div className="testimonials-container">
         <blockquote>
             <p>"NexusLearn AI is a game-changer for our SOC team's continuous training. The ability to generate hyper-specific quizzes on new threat vectors or SIEM queries has drastically improved our readiness."</p>
-            <footer>- Jane Doe, Senior Security Analyst</footer>
+            <footer>— Alex Chen, Senior Security Analyst</footer>
         </blockquote>
         <blockquote>
-            <p>"As a penetration tester, I use this tool to create challenging scenarios for my team. The AI-generated 'Challenge Quests' are surprisingly clever and push us to think outside the box. Indispensable tool."</p>
-            <footer>- John Smith, Lead Pentester</footer>
-        </blockquote>
-        <blockquote>
-            <p>"We've integrated NexusLearn AI into our university's cybersecurity curriculum. It allows us to create dynamic, relevant coursework that keeps pace with the rapidly evolving tech landscape. Student engagement is at an all-time high."</p>
-            <footer>- Dr. Alisha Khan, Professor of Computer Science</footer>
+            <p>"The 'Challenge Quest' feature is brilliant. It's not just about knowing the facts; it's about applying them in the right order. This has been invaluable for our junior analysts."</p>
+            <footer>— Dr. Maria Flores, Cybersecurity Training Lead</footer>
         </blockquote>
     </div>
 );
@@ -378,977 +453,1300 @@ const Testimonials = () => (
 const ContactInfo = () => (
     <div className="contact-info-card">
         <h4>Contact Information</h4>
-        <ul>
-            <li><strong>Name:</strong> Nwaiwu Chibuzor .I.</li>
-            <li><strong>Email:</strong> siriyke947@gmail.com</li>
-            <li><strong>Tel:</strong> +2349039141836</li>
-            <li><strong>Office:</strong> 113 Lagos Street, Umudiagu Mbeiri, Owerri, Imo State, Nigeria</li>
-        </ul>
+        <p><i className="fas fa-map-marker-alt"></i> Quantum Valley, Silicon Oasis</p>
+        <p><i className="fas fa-envelope"></i> support@nexuslearn.ai</p>
+        <p><i className="fas fa-phone"></i> +1 (555) CYBER-01</p>
+        <div className="social-icons">
+             <a href="#" aria-label="LinkedIn Profile" target="_blank" rel="noopener noreferrer"><i className="fab fa-linkedin"></i></a>
+             <a href="#" aria-label="GitHub Repository" target="_blank" rel="noopener noreferrer"><i className="fab fa-github"></i></a>
+             <a href="#" aria-label="Twitter Page" target="_blank" rel="noopener noreferrer"><i className="fab fa-twitter"></i></a>
+        </div>
     </div>
 );
 
+const AboutPage = () => {
+    const [name, setName] = useState('');
+    const [email, setEmail] = useState('');
+    const [message, setMessage] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isSuccess, setIsSuccess] = useState(false);
 
-const Chatbot = ({ isOpen, onClose, parseMarkdown, handleApiError }) => {
-    const [messages, setMessages] = useState([
-        { role: 'model', text: 'Hello! I am the NexusLearn AI Assistant. How can I help you with your cybersecurity studies or our platform today?' }
-    ]);
-    const [userInput, setUserInput] = useState('');
-    const [isLoading, setIsLoading] = useState(false);
-    const chatHistoryRef = useRef(null);
-
-    // Speech-to-Text state and refs
-    const [isListening, setIsListening] = useState(false);
-    const recognitionRef = useRef(null);
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    const isSpeechSupported = !!SpeechRecognition;
-
-
-    useEffect(() => {
-        if (chatHistoryRef.current) {
-            chatHistoryRef.current.scrollTop = chatHistoryRef.current.scrollHeight;
-        }
-    }, [messages, isLoading]);
-
-     // Setup Speech Recognition
-    useEffect(() => {
-        if (!isSpeechSupported) {
-            console.warn("Speech recognition is not supported by this browser.");
-            return;
-        }
-        
-        const recognition = new SpeechRecognition();
-        recognition.continuous = false;
-        recognition.lang = 'en-US';
-        recognition.interimResults = false;
-
-        recognition.onresult = (event) => {
-            const transcript = event.results[event.results.length - 1][0].transcript;
-            setUserInput(transcript);
-        };
-
-        recognition.onerror = (event) => {
-            console.error('Speech recognition error:', event.error);
-            setIsListening(false);
-        };
-        
-        recognition.onend = () => {
-            setIsListening(false);
-        };
-        
-        recognition.onstart = () => {
-            setIsListening(true);
-        };
-
-
-        recognitionRef.current = recognition;
-    }, [isSpeechSupported]);
-
-    const handleToggleListening = () => {
-        if (!recognitionRef.current) return;
-
-        if (isListening) {
-            recognitionRef.current.stop();
-        } else {
-            setUserInput('');
-            try {
-                recognitionRef.current.start();
-            } catch(e) {
-                console.error("Could not start speech recognition:", e);
-                setIsListening(false);
-            }
-        }
-    };
-
-
-    const getSystemInstruction = () => {
-        return `You are a helpful, friendly, and professional AI assistant for the "NexusLearn AI" application, a platform for advanced cybersecurity education. Your name is Oracle.
-        
-        **Your Core Functions:**
-        1.  Answer user questions about the features of the NexusLearn AI app.
-        2.  Provide helpful tips on how to use the app effectively for cybersecurity training and education.
-        3.  If the user asks for "contact", "email", "phone", or similar, respond conversationally that you are providing the contact information. For example: "Of course, here is the contact information for the development team." Then, provide this exact JSON object and nothing else: {"component": "ContactInfo"}.
-        4.  Provide concise, accurate definitions and explanations of cybersecurity concepts.
-        
-        **Tone & Persona:**
-        *   You are an expert, but you are also encouraging and supportive.
-        *   Keep your answers relatively brief and to the point. Use formatting like lists or bold text to improve readability.
-        *   Never break character. Do not mention that you are an AI model.
-        
-        **Boundaries:**
-        *   Do not answer questions that are unrelated to cybersecurity, technology, education, or the NexusLearn AI platform itself.
-        *   Do not provide any real-time threat data, vulnerability reports, or perform any actions that could be construed as actual security operations. You are an educational tool, not a security tool.
-        *   If a question is outside your scope, politely decline, e.g., "My expertise is focused on cybersecurity education. I can't help with that topic, but I'd be happy to answer any questions you have about threat analysis or our platform's features."
-        `;
-    };
-
-    const handleSendMessage = async (e) => {
+    const handleSubmit = (e) => {
         e.preventDefault();
-        if (!userInput.trim() || isLoading) return;
-
-        const newMessages = [...messages, { role: 'user', text: userInput }];
-        setMessages(newMessages);
-        setUserInput('');
-        setIsLoading(true);
-
-        const chatHistory = newMessages.slice(0, -1).map(msg => ({
-            role: msg.role,
-            parts: [{ text: msg.text }]
-        }));
-
-        try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            const chat = ai.chats.create({
-                model: 'gemini-2.5-flash',
-                config: { systemInstruction: getSystemInstruction() },
-                history: chatHistory
-            });
-            
-            const response = await chat.sendMessage({ message: userInput });
-            
-            let modelResponse = response.text;
-            let component = null;
-
-            try {
-                const parsed = JSON.parse(modelResponse);
-                if (parsed.component === 'ContactInfo') {
-                    component = <ContactInfo />;
-                    modelResponse = "Certainly, here is the contact information for the creator.";
-                }
-            } catch (err) {
-                // Not a JSON component, treat as plain text.
-            }
-
-            setMessages(prev => [...prev, { role: 'model', text: modelResponse, component }]);
-        } catch (error) {
-            console.error("Chatbot API error:", error);
-            handleApiError(error);
-            setMessages(prev => [...prev, { role: 'model', text: "Sorry, I encountered an error. Please try again." }]);
-        } finally {
-            setIsLoading(false);
-        }
+        setIsSubmitting(true);
+        // Simulate a form submission
+        setTimeout(() => {
+            setIsSubmitting(false);
+            setIsSuccess(true);
+            setName('');
+            setEmail('');
+            setMessage('');
+            setTimeout(() => setIsSuccess(false), 5000);
+        }, 1500);
     };
-
-    if (!isOpen) return null;
 
     return (
-        <div className="chatbot-container animate-in">
-            <div className="chatbot-header">
-                <h3>NexusLearn AI Assistant</h3>
-                <button onClick={onClose} className="close-btn">&times;</button>
-            </div>
-            <div className="chatbot-history" ref={chatHistoryRef}>
-                {messages.map((msg, index) => (
-                    <div key={index} className={`chat-message ${msg.role}`}>
-                        <div className="message-bubble">
-                            <div dangerouslySetInnerHTML={{ __html: parseMarkdown(msg.text) }}></div>
-                            {msg.component}
+        <div className="about-contact-page animate-in">
+            <section className="about-section content-card">
+                <h2>About NexusLearn AI</h2>
+                <p className="mission-statement">
+                    Our mission is to empower the next generation of cybersecurity professionals with cutting-edge, AI-driven learning tools. We believe in adaptive, hands-on education that evolves as quickly as the threat landscape.
+                </p>
+                <div className="founder-profile">
+                    <h3>Meet the Creator</h3>
+                    <CreatorProfile />
+                </div>
+                 <div className="testimonials-section">
+                    <h3>What Professionals Are Saying</h3>
+                    <Testimonials />
+                </div>
+            </section>
+            <section id="contact" className="contact-section content-card">
+                <h2>Get in Touch</h2>
+                <p>Have questions, feedback, or partnership inquiries? We'd love to hear from you.</p>
+                <div className="contact-layout">
+                    <form onSubmit={handleSubmit} className="form-container">
+                         {isSuccess && <p className="form-success-msg">Thank you for your message! We'll get back to you shortly.</p>}
+                        <div className="form-group">
+                            <label htmlFor="name">Name</label>
+                            <input type="text" id="name" value={name} onChange={(e) => setName(e.target.value)} required />
                         </div>
+                        <div className="form-group">
+                            <label htmlFor="email">Email</label>
+                            <input type="email" id="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+                        </div>
+                        <div className="form-group">
+                            <label htmlFor="message">Message</label>
+                            <textarea id="message" value={message} onChange={(e) => setMessage(e.target.value)} required></textarea>
+                        </div>
+                        <button type="submit" disabled={isSubmitting}>
+                             {isSubmitting ? <><div className="mini-spinner"></div> Sending...</> : 'Send Message'}
+                        </button>
+                    </form>
+                    <div className="contact-info-container">
+                        <ContactInfo />
                     </div>
-                ))}
-                {isLoading && (
-                    <div className="chat-message model">
-                         <div className="message-bubble">
-                            <div className="typing-indicator">
-                                <span></span><span></span><span></span>
-                            </div>
-                         </div>
-                    </div>
-                )}
-            </div>
-            <form onSubmit={handleSendMessage} className="chatbot-input-form">
-                <input
-                    type="text"
-                    value={userInput}
-                    onChange={(e) => setUserInput(e.target.value)}
-                    placeholder="Ask about cybersecurity..."
-                    disabled={isLoading || isListening}
-                />
-                {isSpeechSupported && (
-                    <button type="button" onClick={handleToggleListening} className={`mic-btn ${isListening ? 'listening' : ''}`} disabled={isLoading}>
-                         <i className={`fas fa-microphone`}></i>
-                    </button>
-                )}
-                <button type="submit" disabled={isLoading || !userInput.trim()}>
-                    {isLoading ? <div className="mini-spinner"></div> : <i className="fas fa-paper-plane"></i>}
-                </button>
-            </form>
+                </div>
+            </section>
         </div>
     );
 };
 
-const RotatingLogo = ({ containerClass = '' }) => (
-    <div className={`rotating-logo-container ${containerClass}`}>
-        <svg className="rotating-logo-svg" viewBox="0 0 100 100">
-            <defs>
-                <path id="circlePath" d="M 50, 50 m -42, 0 a 42,42 0 1,1 84,0 a 42,42 0 1,1 -84,0" />
-            </defs>
-            <text className="logo-text-path">
-                <textPath href="#circlePath">
-                    NEXUSLEARN AI • NEXUSLEARN AI •
-                </textPath>
-            </text>
-        </svg>
-        <span className="logo-icon-center">🧠</span>
-    </div>
-);
-
-
-const Header = ({ onNavClick, activePage, userName }) => {
-    const [theme, setTheme] = useState('dark');
+const CyberExpertChatbot = ({ isOpen, onClose, handleApiError }) => {
+    const [status, setStatus] = useState('IDLE');
+    const [transcriptionHistory, setTranscriptionHistory] = useState([]);
+    const [inputText, setInputText] = useState('');
+    const [copiedMessageIndex, setCopiedMessageIndex] = useState(null);
     
-    const userInitials = useMemo(() => {
-        if (!userName) return '👤';
-        const parts = userName.split(' ');
-        if (parts.length > 1) {
-            return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
-        }
-        return userName.substring(0, 2).toUpperCase();
-    }, [userName]);
+    const sessionPromiseRef = useRef(null);
+    const inputAudioContextRef = useRef(null);
+    const outputAudioContextRef = useRef(null);
+    const scriptProcessorRef = useRef(null);
+    const mediaStreamSourceRef = useRef(null);
+    const streamRef = useRef(null);
+    const sourcesRef = useRef(new Set());
+    const nextStartTimeRef = useRef(0);
+    const textareaRef = useRef(null);
+    
+    const currentInputTranscriptionRef = useRef('');
+    const currentOutputTranscriptionRef = useRef('');
+    const systemInstruction = `You are Oracle, a master-level AI expert in all things cybersecurity. Your knowledge spans SOC Analysis, SIEM, SOAR, Red and Blue Team strategies, malware analysis, ethical hacking, cryptography, and network security. You are professional, concise, and provide highly accurate, practical advice. You assist users in learning and solving complex security challenges. When you use a technical or difficult-to-pronounce cybersecurity term, embed its phonetic pronunciation in this format: [term](pronunciation). For example: 'Investigate the [malware](mal-wear) using a sandbox.'`;
 
     useEffect(() => {
-        document.body.className = theme;
-    }, [theme]);
-
-    const handleThemeChange = (e) => {
-        setTheme(e.target.checked ? 'light' : 'dark');
+        if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto';
+            const scrollHeight = textareaRef.current.scrollHeight;
+            textareaRef.current.style.height = `${scrollHeight}px`;
+        }
+    }, [inputText]);
+    
+     const handleCopyToClipboard = (text, index) => {
+        if (!text) return;
+        // Strip the pronunciation markdown for a clean copy.
+        const cleanText = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
+        navigator.clipboard.writeText(cleanText).then(() => {
+            setCopiedMessageIndex(index);
+            setTimeout(() => {
+                setCopiedMessageIndex(null);
+            }, 2000); // Reset after 2 seconds
+        }).catch(err => {
+            console.error('Failed to copy text: ', err);
+            handleApiError(new Error("Could not copy text to clipboard."));
+        });
     };
 
-    return (
-        <header className="eco-header no-print">
-            <div className="logo">
-                <a href="#" onClick={(e) => { e.preventDefault(); onNavClick('generator'); }} aria-label="NexusLearn AI Home">
-                   <RotatingLogo />
-                </a>
-            </div>
-
-            <nav className="site-nav">
-                <button className={`nav-link ${activePage === 'generator' ? 'active' : ''}`} onClick={() => onNavClick('generator')}>Generator</button>
-                <button className={`nav-link ${activePage === 'about' ? 'active' : ''}`} onClick={() => onNavClick('about')}>About & Contact</button>
-            </nav>
-            <div className="header-controls">
-                <div className="user-profile" title={userName || 'User'}>
-                    {userInitials}
-                </div>
-                 <div className="theme-switch-wrapper">
-                    <label className="theme-switch" htmlFor="theme-checkbox">
-                        <input type="checkbox" id="theme-checkbox" onChange={handleThemeChange} checked={theme === 'light'}/>
-                        <div className="slider round"></div>
-                    </label>
-                </div>
-            </div>
-        </header>
-    );
-};
-
-const QuizGenerator = ({ onQuizGenerated, isGenerating, handleApiError }) => {
-    const [topic, setTopic] = useState("Penetration Testing Methodologies");
-    const [numQuestions, setNumQuestions] = useState(5);
-    const [difficulty, setDifficulty] = useState("Intermediate");
-    const [questionTypes, setQuestionTypes] = useState({
-        "Multiple-Choice": true,
-        "Fill-in-the-Blank": true,
-        "Match the Pairs": true,
-        "Scenario-Based": true,
-        "True/False": true,
-        "Ordering": true
-    });
-    const [error, setError] = useState('');
-
-    const handleGenerateClick = async () => {
-        const selectedTypes = Object.keys(questionTypes).filter(type => questionTypes[type]);
-        if (!topic.trim()) {
-            setError("Please enter a topic.");
-            return;
+    const playTextAsAudio = async (text, onEndCallback) => {
+        if (!outputAudioContextRef.current || outputAudioContextRef.current.state === 'closed') {
+            outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
         }
-        if (selectedTypes.length === 0) {
-            setError("Please select at least one question type.");
-            return;
-        }
-        setError('');
         
-        const prompt = `
-        You are an expert cybersecurity curriculum developer. Generate a comprehensive and challenging quiz based on the following specifications.
-        
-        **Topic:** ${topic}
-        **Difficulty:** ${difficulty}
-        **Number of Questions:** ${numQuestions}
-        **Question Types to Include:** ${selectedTypes.join(', ')}
-
-        **Instructions:**
-        1.  **Multiple-Choice:** Provide 4 options. The correct answer must be clearly indicated.
-        2.  **Fill-in-the-Blank:** Use "[BLANK]" to indicate where the user should fill in their answer. Provide the correct answer.
-        3.  **Match the Pairs:** Provide a list of premises and a corresponding list of options to be matched. Ensure a clear key-value pairing for the correct answers.
-        4.  **Scenario-Based:** Present a realistic cybersecurity scenario and ask a multiple-choice question about it. This tests practical application of knowledge.
-        5.  **True/False:** Present a statement that is either true or false. The answer must be the string "True" or "False".
-        6.  **Ordering:** Provide a list of items that need to be put in a specific order (e.g., chronological, procedural). Provide the list of items to be ordered in the 'items' field, and the correctly ordered list as the 'answer'.
-
-        **Output Format:**
-        Return the output as a single, valid JSON object. Do not include any text or markdown formatting before or after the JSON object. The JSON should have a single key, "questions", which is an array of question objects. Each question object must have:
-        -   \`type\`: (string) "Multiple-Choice", "Fill-in-the-Blank", "Match the Pairs", "Scenario-Based", "True/False", or "Ordering".
-        -   \`question\`: (string) The question text.
-        -   \`options\`: (array of strings) Required for "Multiple-Choice" and "Scenario-Based".
-        -   \`answer\`: (string, object, or array) The correct answer. For "Match the Pairs", an object mapping premises to options. For "Ordering", an array of strings in the correct order.
-        -   \`premises\`: (array of strings) Required for "Match the Pairs".
-        -   \`items\`: (array of strings) Required for "Ordering".
-        `;
-
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
             const response = await ai.models.generateContent({
-                model: "gemini-2.5-flash",
+                model: "gemini-2.5-flash-preview-tts",
+                contents: [{ parts: [{ text }] }],
+                config: {
+                    responseModalities: [Modality.AUDIO],
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
+                    },
+                },
+            });
+            
+            const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (base64Audio) {
+                setStatus('SPEAKING');
+                const audioBuffer = await decodeAudioData(
+                    decode(base64Audio),
+                    outputAudioContextRef.current,
+                    24000,
+                    1,
+                );
+                const source = outputAudioContextRef.current.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(outputAudioContextRef.current.destination);
+                
+                source.onended = () => {
+                    sourcesRef.current.delete(source);
+                    if (onEndCallback) onEndCallback();
+                };
+                
+                source.start();
+                sourcesRef.current.add(source);
+            } else {
+                 if (onEndCallback) onEndCallback();
+            }
+        } catch (error) {
+            console.error('TTS for text response failed:', error);
+            handleApiError(error);
+            if (onEndCallback) onEndCallback();
+        }
+    };
+    
+    const sendTextMessage = async (message, history) => {
+        deactivate();
+        setStatus('THINKING');
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            const chatHistory = history
+                .filter(item => item.text)
+                .map(item => ({
+                    role: item.speaker === 'user' ? 'user' : 'model',
+                    parts: [{ text: item.text }]
+                }));
+
+            const chat = ai.chats.create({
+                model: 'gemini-2.5-flash',
+                history: chatHistory,
+                config: { systemInstruction },
+            });
+            
+            const response = await chat.sendMessage({ message });
+            const modelResponseText = response.text;
+            
+            setTranscriptionHistory(prev => [...prev, { speaker: 'model', text: modelResponseText }]);
+            
+            await playTextAsAudio(modelResponseText, () => {
+                 setStatus('IDLE');
+            });
+        } catch (error) {
+            console.error("Text message failed:", error);
+            handleApiError(error);
+            setStatus('ERROR');
+        }
+    };
+
+    const activate = async () => {
+        setStatus('CONNECTING');
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+            inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+
+            streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            sessionPromiseRef.current = ai.live.connect({
+                model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+                callbacks: {
+                    onopen: () => {
+                        setStatus('LISTENING');
+                        const source = inputAudioContextRef.current.createMediaStreamSource(streamRef.current);
+                        mediaStreamSourceRef.current = source;
+                        const scriptProcessor = inputAudioContextRef.current.createScriptProcessor(4096, 1, 1);
+                        scriptProcessorRef.current = scriptProcessor;
+
+                        scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+                            const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+                            const pcmBlob = createBlob(inputData);
+                            sessionPromiseRef.current.then((session) => {
+                                session.sendRealtimeInput({ media: pcmBlob });
+                            });
+                        };
+                        source.connect(scriptProcessor);
+                        scriptProcessor.connect(inputAudioContextRef.current.destination);
+                    },
+                    onmessage: async (message) => {
+                        if (message.serverContent?.inputTranscription) {
+                            currentInputTranscriptionRef.current += message.serverContent.inputTranscription.text;
+                            setTranscriptionHistory(prev => {
+                                const newHistory = [...prev];
+                                const last = newHistory[newHistory.length - 1];
+                                if (last?.speaker === 'user') {
+                                    last.text = currentInputTranscriptionRef.current;
+                                    return newHistory;
+                                }
+                                return [...newHistory, { speaker: 'user', text: currentInputTranscriptionRef.current }];
+                            });
+                        } else if (message.serverContent?.outputTranscription) {
+                            currentOutputTranscriptionRef.current += message.serverContent.outputTranscription.text;
+                             setTranscriptionHistory(prev => {
+                                const newHistory = [...prev];
+                                const last = newHistory[newHistory.length - 1];
+                                if (last?.speaker === 'model') {
+                                    last.text = currentOutputTranscriptionRef.current;
+                                    return newHistory;
+                                }
+                                return [...newHistory, { speaker: 'model', text: currentOutputTranscriptionRef.current }];
+                            });
+                        }
+                        
+                        if (message.serverContent?.turnComplete) {
+                            currentInputTranscriptionRef.current = '';
+                            currentOutputTranscriptionRef.current = '';
+                        }
+                        
+                        const base64EncodedAudioString = message.serverContent?.modelTurn?.parts[0]?.inlineData.data;
+                        if (base64EncodedAudioString) {
+                            setStatus('SPEAKING');
+                            nextStartTimeRef.current = Math.max(
+                                nextStartTimeRef.current,
+                                outputAudioContextRef.current.currentTime,
+                            );
+                            const audioBuffer = await decodeAudioData(
+                                decode(base64EncodedAudioString),
+                                outputAudioContextRef.current,
+                                24000,
+                                1,
+                            );
+                            const source = outputAudioContextRef.current.createBufferSource();
+                            source.buffer = audioBuffer;
+                            source.connect(outputAudioContextRef.current.destination);
+                            
+                            source.addEventListener('ended', () => {
+                                sourcesRef.current.delete(source);
+                                if (sourcesRef.current.size === 0) {
+                                    setStatus('LISTENING');
+                                }
+                            });
+
+                            source.start(nextStartTimeRef.current);
+                            nextStartTimeRef.current += audioBuffer.duration;
+                            sourcesRef.current.add(source);
+                        }
+
+                        const interrupted = message.serverContent?.interrupted;
+                        if (interrupted) {
+                            for (const source of sourcesRef.current.values()) {
+                                source.stop();
+                                sourcesRef.current.delete(source);
+                            }
+                            nextStartTimeRef.current = 0;
+                        }
+                    },
+                    onerror: (e) => {
+                        console.error('Live session error:', e);
+                        handleApiError(new Error("Live chat session failed. Please try again."));
+                        setStatus('ERROR');
+                        deactivate();
+                    },
+                    onclose: () => {},
+                },
+                config: {
+                    responseModalities: [Modality.AUDIO],
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
+                    },
+                    systemInstruction,
+                    inputAudioTranscription: {},
+                    outputAudioTranscription: {},
+                },
+            });
+
+        } catch (error) {
+            console.error("Failed to start voice session:", error);
+            handleApiError(error);
+            setStatus('ERROR');
+        }
+    };
+
+    const deactivate = () => {
+        if (sessionPromiseRef.current) {
+            sessionPromiseRef.current.then(session => session.close());
+            sessionPromiseRef.current = null;
+        }
+
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+        }
+
+        if (scriptProcessorRef.current) {
+            scriptProcessorRef.current.disconnect();
+            scriptProcessorRef.current = null;
+        }
+
+        if (mediaStreamSourceRef.current) {
+            mediaStreamSourceRef.current.disconnect();
+            mediaStreamSourceRef.current = null;
+        }
+
+        if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
+            inputAudioContextRef.current.close();
+        }
+        if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
+            outputAudioContextRef.current.close();
+        }
+
+        sourcesRef.current.forEach(source => source.stop());
+        sourcesRef.current.clear();
+        nextStartTimeRef.current = 0;
+        currentInputTranscriptionRef.current = '';
+        currentOutputTranscriptionRef.current = '';
+        
+        setStatus('IDLE');
+    };
+    
+    const handleToggleSession = () => {
+        if (status === 'IDLE' || status === 'ERROR') {
+            setTranscriptionHistory([]);
+            activate();
+        } else {
+            deactivate();
+        }
+    };
+    
+    const handleTextSubmit = (e) => {
+        e.preventDefault();
+        if (!inputText.trim() || status === 'THINKING' || status === 'SPEAKING') return;
+        const message = inputText.trim();
+        const newHistory = [...transcriptionHistory, { speaker: 'user', text: message }];
+        setTranscriptionHistory(newHistory);
+        sendTextMessage(message, transcriptionHistory);
+        setInputText('');
+    };
+
+    const handleKeyDown = (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleTextSubmit(e);
+        }
+    };
+    
+    useEffect(() => {
+        return () => {
+            if(status !== 'IDLE') {
+                deactivate();
+            }
+        };
+    }, [isOpen]);
+    
+    const chatHistoryRef = useRef(null);
+    useEffect(() => {
+        if (chatHistoryRef.current) {
+            chatHistoryRef.current.scrollTop = chatHistoryRef.current.scrollHeight;
+        }
+    }, [transcriptionHistory]);
+
+    const isPulsating = ['LISTENING', 'CONNECTING', 'SPEAKING'].includes(status);
+
+    return (
+        <div className={`cyber-chatbot-wrapper ${isOpen ? 'open' : ''}`}>
+            <div className="cyber-chatbot-container">
+                <div className="cyber-chatbot-header">
+                    <h3><span role="img" aria-label="Oracle">🔮</span> Oracle AI Expert</h3>
+                    <button onClick={onClose} className="close-btn" aria-label="Close Chatbot">&times;</button>
+                </div>
+                <div className={`cyber-chatbot-status ${status}`}>{status}</div>
+                <div className="cyber-chatbot-history" ref={chatHistoryRef}>
+                    {transcriptionHistory.length === 0 && (
+                        <div className="chat-message-wrapper model">
+                            <div className="chat-message model">
+                                <div className="message-bubble">
+                                    Hello! I am Oracle, your personal cybersecurity expert. Press the microphone or type a message to begin our session. How can I assist you today?
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {transcriptionHistory.map((item, index) => (
+                        <div key={index} className={`chat-message-wrapper ${item.speaker}`}>
+                             {item.speaker === 'user' && (
+                                <button
+                                    className={`copy-to-clipboard-btn ${copiedMessageIndex === index ? 'copied' : ''}`}
+                                    onClick={() => handleCopyToClipboard(item.text, index)}
+                                    aria-label={copiedMessageIndex === index ? 'Copied' : 'Copy message'}
+                                    title={copiedMessageIndex === index ? 'Copied!' : 'Copy'}
+                                >
+                                    <i className={`fas ${copiedMessageIndex === index ? 'fa-check' : 'fa-copy'}`}></i>
+                                </button>
+                            )}
+                            <div className={`chat-message ${item.speaker}`}>
+                                <div className="message-bubble">{item.text ? renderMessageWithPronunciations(item.text) : '...'}</div>
+                            </div>
+                            {item.speaker === 'model' && (
+                                <button
+                                    className={`copy-to-clipboard-btn ${copiedMessageIndex === index ? 'copied' : ''}`}
+                                    onClick={() => handleCopyToClipboard(item.text, index)}
+                                    aria-label={copiedMessageIndex === index ? 'Copied' : 'Copy message'}
+                                    title={copiedMessageIndex === index ? 'Copied!' : 'Copy'}
+                                >
+                                    <i className={`fas ${copiedMessageIndex === index ? 'fa-check' : 'fa-copy'}`}></i>
+                                </button>
+                            )}
+                        </div>
+                    ))}
+                     {status === 'THINKING' && (
+                        <div className="chat-message model">
+                            <div className="message-bubble typing-indicator">
+                                <span></span><span></span><span></span>
+                            </div>
+                        </div>
+                    )}
+                </div>
+                <div className="cyber-chatbot-controls">
+                    <button 
+                        className={`activate-button ${status !== 'IDLE' && status !== 'ERROR' ? 'active' : ''} ${isPulsating ? 'pulsating' : ''}`}
+                        onClick={handleToggleSession}
+                        aria-label={status === 'IDLE' ? "Activate Voice Session" : "Deactivate Voice Session"}
+                    >
+                        {status === 'CONNECTING' ? <div className="mini-spinner"></div> : <i className="fas fa-microphone"></i>}
+                    </button>
+                     <form onSubmit={handleTextSubmit} className="text-input-form">
+                        <textarea
+                            ref={textareaRef}
+                            value={inputText}
+                            onChange={(e) => setInputText(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            placeholder="Or type your message..."
+                            rows="1"
+                            aria-label="Chat message input"
+                            disabled={status === 'SPEAKING' || status === 'THINKING' || status === 'CONNECTING' }
+                        />
+                        <button 
+                            type="submit" 
+                            aria-label="Send Message" 
+                            disabled={!inputText.trim() || status === 'SPEAKING' || status === 'THINKING' || status === 'CONNECTING'}
+                        >
+                            <i className="fas fa-paper-plane"></i>
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+const QuizGenerator = ({ onQuizGenerated, handleApiError }) => {
+    const [topic, setTopic] = useState('Incident Response');
+    const [numQuestions, setNumQuestions] = useState(5);
+    const [questionTypes, setQuestionTypes] = useState(['Multiple-Choice', 'Fill-in-the-Blank', 'True/False', 'Ordering']);
+    const [isLoading, setIsLoading] = useState(false);
+
+    const allQuestionTypes = ['Multiple-Choice', 'Fill-in-the-Blank', 'True/False', 'Ordering', 'Match the Pairs', 'Image-Based'];
+    
+    const handleSelectAll = () => {
+        if (questionTypes.length === allQuestionTypes.length) {
+            setQuestionTypes([]);
+        } else {
+            setQuestionTypes(allQuestionTypes);
+        }
+    };
+
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (questionTypes.length === 0) {
+            handleApiError(new Error("Please select at least one question type."));
+            return;
+        }
+        setIsLoading(true);
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            const prompt = `Generate a challenging cybersecurity quiz on the topic of "${topic}".
+            The quiz should contain exactly ${numQuestions} questions.
+            The questions should be of the following types: ${questionTypes.join(', ')}.
+            Ensure a good mix of the selected types.
+            For Multiple-Choice questions, provide 4 options, with only one being correct.
+            For Fill-in-the-Blank questions, provide the blank word or phrase in the "answer" field.
+            For True/False questions, the "answer" should be either "True" or "False". The question should be a declarative statement.
+            For Ordering questions, provide a list of "items" to be ordered, and the "answer" should be an array with the items in the correct order.
+            For Match the Pairs questions, provide a list of "premises" and a list of "options". The "answer" should be a JSON formatted string of an object that maps each premise to its correct option.
+            For Image-Based questions, provide an AI image generation prompt in the "imagePrompt" field related to the question. The question should then ask to identify or describe something in the potential image. Do not generate an image, just the prompt for it.
+            Return the output as a JSON object with a key "quiz" which is an array of question objects.
+            Each question object must have:
+            1. "type": (e.g., "Multiple-Choice", "Fill-in-the-Blank", "True/False", "Ordering", "Match the Pairs", "Image-Based")
+            2. "question": The question text.
+            3. "options": An array of strings (for Multiple-Choice and Match the Pairs).
+            4. "premises": An array of strings (for Match the Pairs only).
+            5. "items": An array of strings (for Ordering only).
+            6. "answer": The correct answer. For Multiple-Choice, this is the string of the correct option. For Fill-in-the-Blank, it's the missing word/phrase. For Ordering, it's an array of items in the correct sequence. For Match the Pairs, this is a JSON string representing an object mapping premises to options.
+            7. "imagePrompt": A string for the image generation AI (for Image-Based only).
+            Do not include any extra text or markdown formatting in your response.`;
+            
+             const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
                 contents: prompt,
                 config: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
+                    responseMimeType: 'application/json',
+                     responseSchema: {
                         type: Type.OBJECT,
                         properties: {
-                            questions: {
+                            quiz: {
                                 type: Type.ARRAY,
                                 items: {
                                     type: Type.OBJECT,
                                     properties: {
                                         type: { type: Type.STRING },
                                         question: { type: Type.STRING },
-                                        options: { type: Type.ARRAY, items: { type: Type.STRING }, nullable: true },
-                                        items: { type: Type.ARRAY, items: { type: Type.STRING }, nullable: true },
+                                        options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                                        premises: { type: Type.ARRAY, items: { type: Type.STRING } },
+                                        items: { type: Type.ARRAY, items: { type: Type.STRING } },
                                         answer: {
                                             oneOf: [
                                                 { type: Type.STRING },
-                                                {
-                                                    type: Type.OBJECT,
-                                                    properties: {},
-                                                    additionalProperties: { type: Type.STRING }
-                                                },
                                                 { type: Type.ARRAY, items: { type: Type.STRING } }
                                             ]
                                         },
-                                        premises: { type: Type.ARRAY, items: { type: Type.STRING }, nullable: true }
-                                    },
-                                    required: ['type', 'question', 'answer']
+                                        imagePrompt: { type: Type.STRING },
+                                    }
                                 }
                             }
-                        },
-                        required: ['questions']
+                        }
                     }
                 }
             });
 
-            let jsonStr = response.text.trim();
-            const generatedQuiz = JSON.parse(jsonStr);
-            
-            onQuizGenerated({
-                topic,
-                difficulty,
-                questions: generatedQuiz.questions
-            });
+            const quizData = JSON.parse(response.text.trim());
+            onQuizGenerated({ ...quizData, topic });
 
         } catch (error) {
-            console.error("API Error:", error);
+            console.error("Quiz generation failed:", error);
             handleApiError(error);
+        } finally {
+            setIsLoading(false);
         }
-    };
-    
-    const handleSelectAll = (e) => {
-        e.preventDefault();
-        const allSelected = Object.values(questionTypes).every(v => v);
-        const newTypes = {};
-        for (const key in questionTypes) {
-            newTypes[key] = !allSelected;
-        }
-        setQuestionTypes(newTypes);
-    };
-
-    const handleCheckboxChange = (type) => {
-        setQuestionTypes(prev => ({ ...prev, [type]: !prev[type] }));
     };
 
     return (
         <div className="form-container">
-            <div className="content-card animate-in">
-                <h2>Create Your Cybersecurity Quiz</h2>
+            <form onSubmit={handleSubmit}>
+                <h2>Quiz Generator</h2>
                 <div className="form-group">
                     <label htmlFor="topic">Topic</label>
-                    <input type="text" id="topic" value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="e.g., OWASP Top 10, Network Forensics" />
+                    <input
+                        type="text"
+                        id="topic"
+                        value={topic}
+                        onChange={(e) => setTopic(e.target.value)}
+                        required
+                    />
                 </div>
                 <div className="form-group">
-                    <label htmlFor="numQuestions">Number of Questions</label>
-                    <select id="numQuestions" value={numQuestions} onChange={(e) => setNumQuestions(parseInt(e.target.value, 10))}>
-                        <option value="5">5</option>
-                        <option value="10">10</option>
-                        <option value="15">15</option>
-                        <option value="20">20</option>
-                    </select>
-                </div>
-                <div className="form-group">
-                    <label htmlFor="difficulty">Difficulty</label>
-                    <select id="difficulty" value={difficulty} onChange={(e) => setDifficulty(e.target.value)}>
-                        <option>Beginner</option>
-                        <option>Intermediate</option>
-                        <option>Advanced</option>
-                        <option>Expert</option>
-                    </select>
+                    <label htmlFor="numQuestions">Number of Questions ({numQuestions})</label>
+                    <input
+                        type="range"
+                        id="numQuestions"
+                        min="3"
+                        max="15"
+                        value={numQuestions}
+                        onChange={(e) => setNumQuestions(Number(e.target.value))}
+                    />
                 </div>
                 <div className="form-group">
                     <div className="checkbox-group-header">
                         <label>Question Types</label>
-                        <button onClick={handleSelectAll} className="select-all-btn">
-                            {Object.values(questionTypes).every(v => v) ? 'Deselect All' : 'Select All'}
+                        <button type="button" onClick={handleSelectAll} className="select-all-btn">
+                            {questionTypes.length === allQuestionTypes.length ? 'Deselect All' : 'Select All'}
                         </button>
                     </div>
                     <div className="checkbox-group">
-                        {Object.keys(questionTypes).map(type => (
+                        {allQuestionTypes.map(type => (
                             <label key={type}>
-                                <input type="checkbox" checked={questionTypes[type]} onChange={() => handleCheckboxChange(type)} />
+                                <input
+                                    type="checkbox"
+                                    value={type}
+                                    checked={questionTypes.includes(type)}
+                                    onChange={(e) => {
+                                        if (e.target.checked) {
+                                            setQuestionTypes([...questionTypes, type]);
+                                        } else {
+                                            setQuestionTypes(questionTypes.filter(t => t !== type));
+                                        }
+                                    }}
+                                />
                                 <span className="checkmark"></span>
                                 <span>{type}</span>
                             </label>
                         ))}
                     </div>
                 </div>
-                {error && <p className="error-message">{error}</p>}
-                <button onClick={handleGenerateClick} disabled={isGenerating}>
-                    {isGenerating ? <><div className="mini-spinner"></div> Generating...</> : "Generate Quiz"}
+                <button type="submit" disabled={isLoading}>
+                    {isLoading ? <><div className="mini-spinner"></div>Generating...</> : 'Generate Quiz'}
                 </button>
-            </div>
+            </form>
         </div>
     );
 };
 
-const QuizPlaceholder = () => (
-    <div className="quiz-container-placeholder">
-        <div className="content-card" style={{ textAlign: 'center' }}>
-            <h2>Welcome to NexusLearn AI</h2>
-            <p>Your personalized cybersecurity learning platform.</p>
-            <p>Use the panel on the left to generate a quiz on any cybersecurity topic you can imagine. The AI will craft a unique set of questions to test your knowledge.</p>
-            <span style={{ fontSize: '3rem', marginTop: '1rem', display: 'inline-block' }}>🧠</span>
-        </div>
-    </div>
-);
 
-const ExamView = ({ quiz, onBack, onFinish, userName, audioStates, handlePlayAudio, handleApiError, parseMarkdown }) => {
-    const [userAnswers, setUserAnswers] = useState({});
-    const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-    const [isFinished, setIsFinished] = useState(false);
-    const [results, setResults] = useState(null);
-    const [view, setView] = useState('intro'); // intro, exam, results, review
-    const [name, setName] = useState(userName || '');
-    const [explanations, setExplanations] = useState({});
-    const [isExplaining, setIsExplaining] = useState({});
-    const [studyGuideData, setStudyGuideData] = useState(null);
-    const [isGeneratingGuide, setIsGeneratingGuide] = useState(false);
+const ChallengeQuestGenerator = ({ onQuestGenerated, handleApiError }) => {
+    const [topic, setTopic] = useState('Incident Response for a Ransomware Attack');
+    const [numSteps, setNumSteps] = useState(5);
+    const [isLoading, setIsLoading] = useState(false);
 
-
-    const handleAnswerChange = (qIndex, answer) => {
-        setUserAnswers(prev => ({ ...prev, [qIndex]: answer }));
-    };
-
-    const handleNextQuestion = () => {
-        if (currentQuestionIndex < quiz.questions.length - 1) {
-            setCurrentQuestionIndex(prev => prev + 1);
-        } else {
-            handleSubmit();
-        }
-    };
-    
-     const generateStudyGuideAndMappings = async () => {
-        setIsGeneratingGuide(true);
-        const prompt = `
-        You are a cybersecurity master instructor. Based on the following quiz on the topic of "${quiz.topic}", generate a concise study guide and map each question to a key concept from the guide.
-
-        Quiz Questions (JSON format):
-        ${JSON.stringify(quiz.questions.map(q => ({question: q.question, type: q.type})))}
-
-        Instructions:
-        1.  Identify the core cybersecurity concepts tested in the questions.
-        2.  For each concept, write a clear and helpful explanation.
-        3.  Map each original question index to one of the concepts you've identified.
-
-        Output a single, valid JSON object with two top-level keys: "guide" and "mappings".
-        -   "guide": An array of objects. Each object must have:
-            -   "concept": (string) The name of the cybersecurity concept (e.g., "SQL Injection", "Phishing", "Cross-Site Scripting").
-            -   "explanation": (string) A detailed explanation of the concept in markdown format.
-        -   "mappings": An object where keys are the question indices as strings (e.g., "0", "1", "2") and values are the corresponding "concept" string from the "guide" array.
-        `;
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setIsLoading(true);
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            const prompt = `Generate a realistic, multi-step cybersecurity scenario for a "Challenge Quest" on the topic: "${topic}".
+            The scenario should have exactly ${numSteps} distinct, actionable steps.
+            The goal is for a user to learn the correct procedure by observing and then replicating the order of these steps.
+            Return the output as a single JSON object with two keys:
+            1. "title": A concise, professional title for the scenario (e.g., "Phishing Email Triage Procedure").
+            2. "steps": An array of strings, where each string is one step in the correct procedural order. The steps should be clear and imperative (e.g., "Isolate the infected machine from the network.").
+            Do not include any extra text or markdown formatting in your response. Ensure the output is a valid JSON object.`;
+
             const response = await ai.models.generateContent({
-                model: "gemini-2.5-flash",
+                model: 'gemini-2.5-pro',
                 contents: prompt,
                 config: {
                     responseMimeType: "application/json",
                     responseSchema: {
                         type: Type.OBJECT,
                         properties: {
-                            guide: {
+                            title: { type: Type.STRING },
+                            steps: {
                                 type: Type.ARRAY,
-                                items: {
-                                    type: Type.OBJECT,
-                                    properties: {
-                                        concept: { type: Type.STRING },
-                                        explanation: { type: Type.STRING }
-                                    },
-                                    required: ['concept', 'explanation']
-                                }
-                            },
-                            mappings: {
-                                type: Type.OBJECT,
-                                properties: {},
-                                additionalProperties: { type: Type.STRING }
+                                items: { type: Type.STRING }
                             }
-                        },
-                        required: ['guide', 'mappings']
+                        }
                     }
-                }
+                },
             });
-            const parsedResponse = JSON.parse(response.text.trim());
-            setStudyGuideData(parsedResponse);
+
+            const questData = JSON.parse(response.text.trim());
+            onQuestGenerated(questData);
+
         } catch (error) {
-            console.error("Study guide generation failed:", error);
+            console.error("Quest generation failed:", error);
             handleApiError(error);
         } finally {
-            setIsGeneratingGuide(false);
+            setIsLoading(false);
         }
     };
 
+    return (
+        <div className="form-container">
+            <form onSubmit={handleSubmit}>
+                <h2>Challenge Quest Setup</h2>
+                <div className="form-group">
+                    <label htmlFor="quest-topic">Scenario Topic</label>
+                    <input
+                        type="text"
+                        id="quest-topic"
+                        value={topic}
+                        onChange={(e) => setTopic(e.target.value)}
+                        required
+                    />
+                </div>
+                <div className="form-group">
+                    <label htmlFor="numSteps">Number of Steps ({numSteps})</label>
+                    <input
+                        type="range"
+                        id="numSteps"
+                        min="4"
+                        max="8"
+                        value={numSteps}
+                        onChange={(e) => setNumSteps(Number(e.target.value))}
+                    />
+                </div>
+                <button type="submit" disabled={isLoading}>
+                    {isLoading ? <><div className="mini-spinner"></div> Creating Scenario...</> : 'Begin Quest'}
+                </button>
+            </form>
+        </div>
+    );
+};
 
-    const handleSubmit = () => {
-        let score = 0;
-        const detailedResults = quiz.questions.map((q, index) => {
-            const userAnswer = userAnswers[index];
-            let isCorrect = false;
 
-            if (typeof userAnswer === 'undefined' || userAnswer === null) {
-                isCorrect = false;
-            } else if (q.type === 'Match the Pairs' || q.type === 'Ordering') {
-                isCorrect = JSON.stringify(userAnswer) === JSON.stringify(q.answer);
-            } else {
-                isCorrect = userAnswer.toString().toLowerCase() === q.answer.toString().toLowerCase();
-            }
+const ExamView = ({ quiz, onSubmit, onBack, userName }) => {
+    const [userAnswers, setUserAnswers] = useState(Array(quiz.questions.length).fill(null));
+    const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
 
-            if (isCorrect) score++;
-            return { question: q, userAnswer, isCorrect };
-        });
-
-        const percentage = (score / quiz.questions.length) * 100;
-        setResults({ score, total: quiz.questions.length, percentage, detailedResults });
-        setIsFinished(true);
-        setView('results');
-        generateStudyGuideAndMappings();
+    const handleAnswerChange = (qIndex, answer) => {
+        const newAnswers = [...userAnswers];
+        newAnswers[qIndex] = answer;
+        setUserAnswers(newAnswers);
     };
-    
-    const handleRetryIncorrect = () => {
-        const incorrectQuestions = results.detailedResults
-            .filter(r => !r.isCorrect)
-            .map(r => r.question);
 
-        if (incorrectQuestions.length > 0) {
-            const newQuiz = { ...quiz, questions: incorrectQuestions };
-            onFinish(newQuiz); // Pass the new quiz back up to the main App component
-        }
-    };
-    
-    const handleGetExplanation = async (qIndex) => {
-        setIsExplaining(prev => ({...prev, [qIndex]: true}));
-        const question = quiz.questions[qIndex];
-        const userAnswer = userAnswers[qIndex];
-        const correctAnswer = question.answer;
-
-        let correctAnswerText = '';
-        if (question.type === 'Match the Pairs') {
-            correctAnswerText = Object.entries(correctAnswer).map(([key, value]) => `${key} -> ${value}`).join(', ');
-        } else if (question.type === 'Ordering') {
-            correctAnswerText = (correctAnswer as string[]).join(' -> ');
-        } else {
-            correctAnswerText = Array.isArray(correctAnswer) ? correctAnswer.join(', ') : correctAnswer;
-        }
-
-        let userAnswerText = '';
-        if (question.type === 'Match the Pairs') {
-            userAnswerText = userAnswer ? Object.entries(userAnswer).map(([key, value]) => `${key} -> ${value}`).join(', ') : "Not answered";
-        } else if (question.type === 'Ordering') {
-            userAnswerText = userAnswer ? (userAnswer as string[]).join(' -> ') : "Not answered";
-        } else {
-            userAnswerText = Array.isArray(userAnswer) ? userAnswer.join(', ') : (userAnswer || "Not answered");
-        }
-        
-         const prompt = `You are an expert cybersecurity professor, known for your clear, detailed, and encouraging explanations. A student has answered a question incorrectly during an exam review. Your task is to provide a high-quality explanation to help them understand their mistake and master the concept.
-
-**Question:**
-"${question.question}"
-
-**Correct Answer:**
-"${correctAnswerText}"
-
-**Student's Incorrect Answer:**
-"${userAnswerText}"
-
-Please provide a detailed explanation using the following structure. Use markdown for clear formatting (e.g., headings, bold text, lists).
-
-### 🧠 Core Concept
-Briefly explain the fundamental cybersecurity principle or concept being tested in this question.
-
-### ✅ Why the Correct Answer is Right
-Detail why "${correctAnswerText}" is the correct choice. Explain the mechanism, process, or reason that makes it the right answer in the context of the question.
-
-### ❌ Analysis of the Incorrect Answer
-Explain why the student's answer, "${userAnswerText}", is incorrect. Be specific. If it's a plausible but wrong answer, explain the nuance they might have missed.
-
-### 💡 Key Takeaway & Real-World Example
-Provide a simple, memorable takeaway or a brief, real-world example to help the student solidify their understanding and remember the concept for the future.`;
-
-        try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: prompt,
-            });
-            setExplanations(prev => ({...prev, [qIndex]: response.text}));
-        } catch (error) {
-            console.error("Explanation generation failed:", error);
-            handleApiError(error);
-            setExplanations(prev => ({...prev, [qIndex]: "Sorry, I couldn't generate an explanation at this time."}));
-        } finally {
-            setIsExplaining(prev => ({...prev, [qIndex]: false}));
+    const handleNext = () => {
+        if (currentQuestionIndex < quiz.questions.length - 1) {
+            setCurrentQuestionIndex(currentQuestionIndex + 1);
         }
     };
     
+    const handlePrevious = () => {
+        if (currentQuestionIndex > 0) {
+            setCurrentQuestionIndex(currentQuestionIndex - 1);
+        }
+    };
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        onSubmit(userAnswers);
+    };
 
     const currentQuestion = quiz.questions[currentQuestionIndex];
-    const isAnswered = userAnswers.hasOwnProperty(currentQuestionIndex) && userAnswers[currentQuestionIndex] !== '' && userAnswers[currentQuestionIndex] !== undefined;
-
     const progress = (currentQuestionIndex / quiz.questions.length) * 100;
-
-    if (view === 'intro') {
-        return (
-            <div className="content-card exam-intro animate-in">
-                <h2>{quiz.topic} Exam</h2>
-                <p>You are about to begin an exam on <strong>{quiz.topic}</strong> with <strong>{quiz.questions.length}</strong> questions.</p>
-                <p>This exam is rated for <strong>{quiz.difficulty}</strong> level.</p>
-                <form className="start-exam-form" onSubmit={(e) => { e.preventDefault(); setView('exam'); }}>
-                    <div className="form-group">
-                        <label htmlFor="exam-name">Enter Your Name</label>
-                        <input
-                            type="text"
-                            id="exam-name"
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                            placeholder="Your Name"
-                            required
-                        />
-                    </div>
-                    <button type="submit">Start Exam</button>
-                </form>
-            </div>
-        );
-    }
-    
-    const handleCertificateDownload = () => {
-        const certElement = document.getElementById('certificate');
-        if (certElement) {
-             html2canvas(certElement, { 
-                scale: 2, // Higher scale for better quality
-                useCORS: true, // Important for external images
-                backgroundColor: null, // Use transparent background
-             }).then(canvas => {
-                const link = document.createElement('a');
-                link.download = `NexusLearn_AI_Certificate_${quiz.topic.replace(/\s+/g, '_')}.png`;
-                link.href = canvas.toDataURL('image/png');
-                link.click();
-            });
-        }
-    };
-
-    if (view === 'results') {
-         const pass = results.percentage >= 70;
-        return (
-            <div className="content-card exam-results fade-in">
-                <h2>Exam Results</h2>
-                <p>Well done, {name}!</p>
-                <p>You scored:</p>
-                <div className={`score ${pass ? 'pass' : 'fail'}`}>
-                    {results.percentage.toFixed(1)}%
-                </div>
-                <p>({results.score} out of {results.total} correct)</p>
-                <p>{pass ? "Congratulations on passing!" : "Keep studying and try again. You can do it!"}</p>
-                <div className="results-actions">
-                    <button onClick={onBack}>Back to Generator</button>
-                    <button onClick={() => setView('review')}>Review Answers</button>
-                    {results.detailedResults.some(r => !r.isCorrect) && (
-                        <button onClick={handleRetryIncorrect} className="retry-incorrect-btn">Retry Incorrect</button>
-                    )}
-                </div>
-                {pass && (
-                    <Certificate 
-                        name={name} 
-                        topic={quiz.topic} 
-                        onDownload={handleCertificateDownload}
-                        handleApiError={handleApiError}
-                    />
-                )}
-                 <div className="study-guide-section">
-                    <h3><span role="img" aria-label="books">📚</span> Personalized Study Guide</h3>
-                    {isGeneratingGuide && <QuizSkeleton />}
-                    {!isGeneratingGuide && studyGuideData && (
-                        <div className="study-guide-content">
-                            {studyGuideData.guide.map((item, index) => (
-                                <div key={index} className="study-guide-item">
-                                    <h4>{item.concept}</h4>
-                                    <div dangerouslySetInnerHTML={{ __html: parseMarkdown(item.explanation) }}></div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
-            </div>
-        );
-    }
-    
-    if(view === 'review') {
-        return (
-            <div className="content-card exam-review fade-in">
-                 <button onClick={onBack} className="back-btn" style={{marginBottom: '1rem', width:'auto'}}>
-                    <span role="img" aria-label="back">⬅️</span> Back to Generator
-                </button>
-                <h3>Answer Review</h3>
-                {quiz.questions.map((q, index) => {
-                     const result = results.detailedResults[index];
-                     const userAnswer = result.userAnswer;
-                     const isCorrect = result.isCorrect;
-                     const isPlaying = audioStates[q.question]?.isPlaying;
-                     const isLoadingAudio = audioStates[q.question]?.isLoading;
-                     const conceptName = studyGuideData?.mappings[index];
-                     const guideEntry = conceptName ? studyGuideData.guide.find(g => g.concept === conceptName) : null;
-
-                     
-                     let userAnswerDisplay;
-                     let correctAnswerDisplay;
-                     
-                     if (q.type === 'Match the Pairs') {
-                        userAnswerDisplay = userAnswer ? <ul>{Object.entries(userAnswer).map(([p, o]) => <li key={p}><strong>{p}:</strong> {o as string}</li>)}</ul> : <p>Not answered</p>;
-                        correctAnswerDisplay = <ul>{Object.entries(q.answer).map(([p, o]) => <li key={p}><strong>{p}:</strong> {o as string}</li>)}</ul>;
-                     } else if (q.type === 'Ordering') {
-                        userAnswerDisplay = userAnswer ? <ol>{(userAnswer as string[]).map((item, i) => <li key={i}>{item}</li>)}</ol> : <p>Not answered</p>;
-                        correctAnswerDisplay = <ol>{(q.answer as string[]).map((item, i) => <li key={i}>{item}</li>)}</ol>;
-                     } else {
-                         userAnswerDisplay = <p>{userAnswer || 'Not answered'}</p>;
-                         correctAnswerDisplay = <p>{Array.isArray(q.answer) ? q.answer.join(', ') : q.answer}</p>
-                     }
-                     
-                     return (
-                        <div key={index} className={`exam-question-review ${isCorrect ? 'correct' : 'incorrect'}`}>
-                            <div className="question-header">
-                                <strong>Question {index + 1}:</strong> 
-                                <button
-                                    className="audio-btn"
-                                    onClick={() => handlePlayAudio(q.question)}
-                                    disabled={isLoadingAudio || isPlaying}
-                                    aria-label={`Play audio for question ${index + 1}`}
-                                    title={isPlaying ? "Stop audio" : "Read question aloud"}
-                                >
-                                    {isLoadingAudio ? <div className="mini-spinner"></div> : isPlaying ? <i className="fas fa-stop"></i> : <i className="fas fa-volume-high"></i>}
-                                </button>
-                            </div>
-                            <p>{q.question}</p>
-                            
-                             <div className="answer-line">
-                                <span role="img" aria-label="your answer">🗣️</span> <strong>Your Answer:</strong> {userAnswerDisplay}
-                             </div>
-                             {!isCorrect && (
-                                <div className="answer-line">
-                                    <span role="img" aria-label="correct answer">✅</span> <strong>Correct Answer:</strong> {correctAnswerDisplay}
-                                </div>
-                             )}
-                            {!isCorrect && guideEntry && (
-                                <div className="hint-content">
-                                    <strong><span role="img" aria-label="lightbulb">💡</span> Study Guide Hint: {guideEntry.concept}</strong>
-                                    <div dangerouslySetInnerHTML={{ __html: parseMarkdown(guideEntry.explanation) }}></div>
-                                </div>
-                            )}
-                              {!isCorrect && (
-                                <div className="ai-professor">
-                                    <button onClick={() => handleGetExplanation(index)} disabled={isExplaining[index]} style={{width: 'auto', fontSize: '0.9rem', padding: '0.4rem 0.8rem'}}>
-                                        {isExplaining[index] ? <><div className="mini-spinner"></div> Thinking...</> : <> <span role="img" aria-label="brain">🧠</span> Ask AI Professor</>}
-                                    </button>
-                                     {explanations[index] && (
-                                        <div className="explanation-content" dangerouslySetInnerHTML={{ __html: parseMarkdown(explanations[index]) }}></div>
-                                    )}
-                                </div>
-                            )}
-                        </div>
-                     )
-                })}
-            </div>
-        )
-    }
+    const isAnswered = userAnswers[currentQuestionIndex] !== null && userAnswers[currentQuestionIndex] !== '';
 
 
     return (
-        <div className="content-card animate-in">
-            <h2>{quiz.topic}</h2>
-            <div className="exam-progress-container">
+        <div className="generated-quiz-view content-card animate-in">
+            <div className="quiz-actions-header">
+                <button onClick={onBack} className="back-btn no-print"><i className="fas fa-arrow-left"></i> Back to Generator</button>
+            </div>
+            
+            <div className="exam-intro">
+                 <h2>{quiz.topic} Assessment</h2>
+                 <p>Welcome, {userName}. Please answer the following questions.</p>
+            </div>
+            
+             <div className="exam-progress-container">
                 <div className="progress-bar">
                     <div className="progress-bar-fill" style={{ width: `${progress}%` }}></div>
                 </div>
                 <span className="progress-text">{currentQuestionIndex + 1} / {quiz.questions.length}</span>
             </div>
-            
-            <div className={`exam-question ${isAnswered ? 'answered' : ''}`}>
-                 <div className="question-header">
-                    <strong>Question {currentQuestionIndex + 1}:</strong>
-                    <button
-                        className="audio-btn"
-                        onClick={() => handlePlayAudio(currentQuestion.question)}
-                        disabled={audioStates[currentQuestion.question]?.isLoading || audioStates[currentQuestion.question]?.isPlaying}
-                        aria-label={`Play audio for question ${currentQuestionIndex + 1}`}
-                        title={audioStates[currentQuestion.question]?.isPlaying ? "Stop audio" : "Read question aloud"}
-                    >
-                        {audioStates[currentQuestion.question]?.isLoading ? <div className="mini-spinner"></div> : audioStates[currentQuestion.question]?.isPlaying ? <i className="fas fa-stop"></i> : <i className="fas fa-volume-high"></i>}
-                    </button>
-                 </div>
-                <p>{currentQuestion.question}</p>
 
-                {currentQuestion.type === 'Multiple-Choice' || currentQuestion.type === 'Scenario-Based' ? (
-                    <div className="exam-options">
-                        {currentQuestion.options.map((option, index) => (
-                            <label key={index} className="option-label">
-                                <input type="radio" name={`q${currentQuestionIndex}`} value={option}
-                                    checked={userAnswers[currentQuestionIndex] === option}
-                                    onChange={(e) => handleAnswerChange(currentQuestionIndex, e.target.value)} />
-                                <span>{option}</span>
-                            </label>
-                        ))}
-                    </div>
-                ) : currentQuestion.type === 'True/False' ? (
-                    <div className="exam-options">
-                        {["True", "False"].map((option, index) => (
-                            <label key={index} className="option-label">
-                                <input type="radio" name={`q${currentQuestionIndex}`} value={option}
-                                    checked={userAnswers[currentQuestionIndex] === option}
-                                    onChange={(e) => handleAnswerChange(currentQuestionIndex, e.target.value)} />
-                                <span>{option}</span>
-                            </label>
-                        ))}
-                    </div>
-                ) : currentQuestion.type === 'Fill-in-the-Blank' ? (
-                    <div className="fill-blank-input">
-                        <input type="text" value={userAnswers[currentQuestionIndex] || ''}
+            <form onSubmit={handleSubmit}>
+                <div className="exam-question fade-in">
+                    <h4>Question {currentQuestionIndex + 1}: {currentQuestion.question}</h4>
+                    
+                    {currentQuestion.type === 'Multiple-Choice' && (
+                        <div className="exam-options">
+                            {(currentQuestion.options || []).map((option, index) => (
+                                <label key={index} className="option-label">
+                                    <input
+                                        type="radio"
+                                        name={`q${currentQuestionIndex}`}
+                                        value={option}
+                                        checked={userAnswers[currentQuestionIndex] === option}
+                                        onChange={(e) => handleAnswerChange(currentQuestionIndex, e.target.value)}
+                                    />
+                                    <span>{option}</span>
+                                </label>
+                            ))}
+                        </div>
+                    )}
+
+                    {currentQuestion.type === 'Fill-in-the-Blank' && (
+                        <input
+                            type="text"
+                            className="fill-blank-input"
+                            value={userAnswers[currentQuestionIndex] || ''}
                             onChange={(e) => handleAnswerChange(currentQuestionIndex, e.target.value)}
-                            placeholder="Type your answer here" />
-                    </div>
-                ) : currentQuestion.type === 'Match the Pairs' ? (
-                   <MatchThePairsQuestion 
-                        q={currentQuestion} 
-                        qIndex={currentQuestionIndex}
-                        userAnswer={userAnswers[currentQuestionIndex]}
-                        onAnswerChange={handleAnswerChange}
-                   />
-                ) : currentQuestion.type === 'Ordering' ? (
-                    <OrderingQuestion
-                        q={currentQuestion}
-                        qIndex={currentQuestionIndex}
-                        userAnswer={userAnswers[currentQuestionIndex]}
-                        onAnswerChange={handleAnswerChange}
-                    />
-                ) : null}
-            </div>
+                        />
+                    )}
+                    
+                     {currentQuestion.type === 'True/False' && (
+                        <div className="exam-options">
+                            {['True', 'False'].map((option, index) => (
+                                <label key={index} className="option-label">
+                                    <input
+                                        type="radio"
+                                        name={`q${currentQuestionIndex}`}
+                                        value={option}
+                                        checked={userAnswers[currentQuestionIndex] === option}
+                                        onChange={(e) => handleAnswerChange(currentQuestionIndex, e.target.value)}
+                                    />
+                                    <span>{option}</span>
+                                </label>
+                            ))}
+                        </div>
+                    )}
 
-            <button onClick={handleNextQuestion} disabled={!isAnswered}>
-                {currentQuestionIndex < quiz.questions.length - 1 ? 'Next Question' : 'Submit Exam'}
-            </button>
+                    {currentQuestion.type === 'Match the Pairs' && (
+                       <MatchThePairsQuestion 
+                           q={currentQuestion} 
+                           qIndex={currentQuestionIndex} 
+                           userAnswer={userAnswers[currentQuestionIndex]}
+                           onAnswerChange={handleAnswerChange}
+                       />
+                    )}
+
+                     {currentQuestion.type === 'Ordering' && (
+                       <OrderingQuestion 
+                           q={currentQuestion} 
+                           qIndex={currentQuestionIndex} 
+                           userAnswer={userAnswers[currentQuestionIndex]}
+                           onAnswerChange={handleAnswerChange}
+                       />
+                    )}
+                </div>
+                
+                <div className="exam-navigation">
+                     <button type="button" onClick={handlePrevious} disabled={currentQuestionIndex === 0} className="secondary-btn">Previous</button>
+                    {currentQuestionIndex < quiz.questions.length - 1 ? (
+                        <button type="button" onClick={handleNext} disabled={!isAnswered}>Next Question</button>
+                    ) : (
+                        <button type="submit">Submit Answers</button>
+                    )}
+                </div>
+            </form>
         </div>
     );
 };
 
-const QuizPaperView = ({ quiz, onBack }) => {
-    const [showAnswers, setShowAnswers] = useState(false);
+const ChallengeQuestView = ({ quest, onComplete, onBack, handleApiError }) => {
+    const [phase, setPhase] = useState('briefing'); // briefing -> challenge -> debriefing
+    const [userAnswer, setUserAnswer] = useState(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [debriefing, setDebriefing] = useState('');
     
-    const handlePrint = () => {
-        window.print();
+    // For briefing phase
+    const [currentStepIndex, setCurrentStepIndex] = useState(-1);
+    const [isSpeaking, setIsSpeaking] = useState(false);
+    const audioContextRef = useRef(null);
+    const audioQueueRef = useRef([]);
+    const isPlayingRef = useRef(false);
+    const questSteps = quest?.steps || [];
+
+     useEffect(() => {
+        if (phase === 'briefing') {
+            const timer = setTimeout(() => {
+                setCurrentStepIndex(0);
+            }, 500);
+            return () => clearTimeout(timer);
+        }
+    }, [phase]);
+    
+    useEffect(() => {
+        if (phase === 'briefing' && currentStepIndex >= 0 && currentStepIndex < questSteps.length) {
+            playText(questSteps[currentStepIndex]);
+        }
+    }, [currentStepIndex, phase, questSteps]);
+
+
+    const playText = async (text) => {
+        audioQueueRef.current.push(text);
+        if (isPlayingRef.current) return;
+        
+        isPlayingRef.current = true;
+        setIsSpeaking(true);
+        
+        if (!audioContextRef.current) {
+            // FIX: Cast window to any to access webkitAudioContext for older browser compatibility.
+            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        }
+
+        while(audioQueueRef.current.length > 0) {
+            const currentText = audioQueueRef.current.shift();
+            try {
+                 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+                 const response = await ai.models.generateContent({
+                    model: "gemini-2.5-flash-preview-tts",
+                    contents: [{ parts: [{ text: currentText }] }],
+                    config: {
+                        responseModalities: [Modality.AUDIO],
+                        speechConfig: {
+                            voiceConfig: {
+                                prebuiltVoiceConfig: { voiceName: 'Kore' },
+                            },
+                        },
+                    },
+                });
+                
+                const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+                if (base64Audio) {
+                    const audioBuffer = await decodeAudioData(
+                        decode(base64Audio),
+                        audioContextRef.current,
+                        24000,
+                        1,
+                    );
+                    const source = audioContextRef.current.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(audioContextRef.current.destination);
+                    
+                    // FIX: Specify Promise type as <void> to correctly handle resolve() with no arguments.
+                    await new Promise<void>(resolve => {
+                        source.onended = () => {
+                            if (currentStepIndex < questSteps.length - 1) {
+                                setCurrentStepIndex(i => i + 1);
+                            } else {
+                                // Last step finished, move to challenge
+                                setTimeout(() => setPhase('challenge'), 1000);
+                            }
+                            resolve();
+                        };
+                        source.start();
+                    });
+                }
+            } catch (error) {
+                console.error('TTS failed:', error);
+                handleApiError(error);
+                // On TTS error, just reveal the steps visually
+                 if (currentStepIndex < questSteps.length - 1) {
+                    setCurrentStepIndex(i => i + 1);
+                } else {
+                    setTimeout(() => setPhase('challenge'), 1000);
+                }
+            }
+        }
+        
+        isPlayingRef.current = false;
+        setIsSpeaking(false);
+    };
+
+
+    const handleChallengeSubmit = (finalOrder) => {
+        setUserAnswer(finalOrder);
+        setPhase('debriefing');
+    };
+    
+    const generateDebriefing = async () => {
+        setIsLoading(true);
+        setDebriefing('');
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            const prompt = `A cybersecurity trainee was given the following scenario: "${quest.title}".
+            The correct order of steps is:
+            ${questSteps.map((s, i) => `${i + 1}. ${s}`).join('\n')}
+            
+            Their submitted order was:
+            ${(userAnswer || []).map((s, i) => `${i + 1}. ${s}`).join('\n')}
+            
+            Provide a professional "debriefing". Explain concisely why the correct order is crucial for success in this scenario. Focus on the logic and consequences of performing steps in the wrong sequence. Address the user directly as "you". Keep it under 150 words.`;
+            
+             const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: prompt,
+            });
+            setDebriefing(response.text);
+
+        } catch (error) {
+            console.error("Debriefing generation failed:", error);
+            handleApiError(error);
+            setDebriefing("Failed to generate debriefing. Please check the console for errors.");
+        } finally {
+            setIsLoading(false);
+        }
     };
 
     return (
-        <div className="content-card generated-quiz-view animate-in">
+        <div className="content-card animate-in">
+             <div className="quiz-actions-header">
+                <button onClick={onBack} className="back-btn no-print"><i className="fas fa-arrow-left"></i> Back to Setup</button>
+            </div>
+            
+            <h2>Challenge Quest: {quest.title}</h2>
+
+            {phase === 'briefing' && (
+                <div className="quest-briefing-view">
+                    <h3>The Briefing: Observe the Expert</h3>
+                    <p>Oracle, our AI expert, will now demonstrate the correct procedure. Pay close attention.</p>
+                     <div className="quest-steps-container">
+                        {questSteps.map((step, index) => (
+                            <div key={index} className={`quest-step ${index <= currentStepIndex ? 'visible' : ''}`}>
+                                <strong>Step {index + 1}:</strong> {step}
+                            </div>
+                        ))}
+                    </div>
+                    {isSpeaking && <div className="speaking-indicator">Oracle is speaking...</div>}
+                </div>
+            )}
+            
+            {phase === 'challenge' && (
+                 <div className="quest-challenge-view">
+                    <h3>Your Turn: Replicate the Procedure</h3>
+                    <p>Now, show what you've learned. Arrange the steps into the correct procedural order.</p>
+                     <OrderingQuestion 
+                        q={{ items: questSteps }} 
+                        qIndex={0} 
+                        userAnswer={null}
+                        onAnswerChange={(index, answer) => setUserAnswer(answer)} // Temporarily store answer
+                    />
+                    <button onClick={() => handleChallengeSubmit(userAnswer)} disabled={!userAnswer}>Submit Sequence</button>
+                 </div>
+            )}
+            
+            {phase === 'debriefing' && (
+                <div className="quest-debriefing-view">
+                    <h3>The Debriefing: Results & Analysis</h3>
+                    <div className="debriefing-comparison">
+                        <div className="comparison-column">
+                            <h4>Correct Order</h4>
+                            <ol>
+                                {questSteps.map((step, i) => <li key={i}>{step}</li>)}
+                            </ol>
+                        </div>
+                         <div className="comparison-column">
+                            <h4>Your Answer</h4>
+                             <ol>
+                                {(userAnswer || []).map((step, i) => {
+                                    const isCorrect = questSteps[i] === step;
+                                    return <li key={i} className={isCorrect ? 'correct' : 'incorrect'}>{step}</li>;
+                                })}
+                            </ol>
+                        </div>
+                    </div>
+                    
+                    <div className="debriefing-actions">
+                         <button onClick={generateDebriefing} disabled={isLoading}>
+                            {isLoading ? <><div className="mini-spinner"></div> Analyzing...</> : 'Request AI Debriefing'}
+                        </button>
+                        <button onClick={onComplete} className="secondary-btn">Try Another Quest</button>
+                    </div>
+                    
+                    {debriefing && (
+                        <div className="ai-debriefing-content">
+                            <h4>Oracle's Analysis</h4>
+                            <p>{debriefing}</p>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
+const ExamResults = ({ results, quiz, onRetry, onRetryIncorrect, onNewQuiz, onViewCertificate, handleApiError }) => {
+    const { score, correct, incorrect, total } = results;
+    const passThreshold = 70;
+    const passed = score >= passThreshold;
+
+    return (
+        <div className="exam-results content-card animate-in">
+            <h2>Assessment Complete</h2>
+            <p>You scored:</p>
+            <div className={`score ${passed ? 'pass' : 'fail'}`}>{score}%</div>
+            <p>{correct} out of {total} questions correct.</p>
+            
+            <div className="results-actions">
+                <button onClick={onNewQuiz}>New Quiz</button>
+                <button onClick={onRetry}>Retry Full Quiz</button>
+                {incorrect > 0 && (
+                    <button onClick={onRetryIncorrect} className="retry-incorrect-btn">
+                        Retry {incorrect} Incorrect Questions
+                    </button>
+                )}
+                {passed && <button onClick={onViewCertificate} className="download-cert-btn">Claim Certificate</button>}
+            </div>
+            
+            <ExamReview results={results} quiz={quiz} handleApiError={handleApiError} />
+        </div>
+    );
+};
+
+const ExamReview = ({ results, quiz, handleApiError }) => {
+    const [hint, setHint] = useState({});
+    const [explanation, setExplanation] = useState({});
+    const [sources, setSources] = useState({});
+    const [isLoading, setIsLoading] = useState({});
+    
+     const getAiHelp = async (qIndex, type) => {
+        setIsLoading(prev => ({...prev, [`${type}-${qIndex}`]: true}));
+        const question = quiz.questions[qIndex];
+        const helpType = type === 'hint' ? 'a brief hint' : 'a detailed explanation';
+        const isExplanation = type === 'explanation';
+
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            const prompt = `For the cybersecurity question: "${question.question}", provide ${helpType}. The correct answer is "${JSON.stringify(question.answer)}". Be concise and helpful for a student.`;
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: prompt,
+                config: {
+                    ...(isExplanation && { tools: [{ googleSearch: {} }] })
+                }
+            });
+            
+            if(type === 'hint') {
+                setHint(prev => ({...prev, [qIndex]: response.text}));
+            } else {
+                setExplanation(prev => ({...prev, [qIndex]: response.text}));
+                const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+                if (groundingChunks) {
+                    setSources(prev => ({ ...prev, [qIndex]: groundingChunks }));
+                }
+            }
+
+        } catch (error) {
+            console.error(`${type} generation failed:`, error);
+            handleApiError(error);
+        } finally {
+             setIsLoading(prev => ({...prev, [`${type}-${qIndex}`]: false}));
+        }
+    };
+
+    const renderAnswerText = (answer, questionType) => {
+        if (answer === null || answer === undefined || answer === '') return "No answer";
+
+        if (questionType === 'Match the Pairs') {
+            let answerObj = answer;
+            if (typeof answer === 'string') {
+                try {
+                    answerObj = JSON.parse(answer);
+                } catch (e) {
+                    return answer; // Not a valid JSON string, display as is.
+                }
+            }
+            if (typeof answerObj === 'object' && answerObj !== null) {
+                return Object.entries(answerObj).map(([key, val]) => <div key={key}>{key}: {val as string}</div>);
+            }
+        }
+        
+        if (Array.isArray(answer)) {
+            return answer.join(', ');
+        }
+        
+        if (typeof answer === 'object' && answer !== null) {
+            return JSON.stringify(answer); // Fallback for any other objects
+        }
+
+        return String(answer);
+    };
+
+    return (
+        <div className="exam-review">
+            <h3>Review Your Answers</h3>
+            {quiz.questions.map((q, i) => {
+                const result = results.detailed[i];
+                return (
+                    <div key={i} className={`exam-question-review ${result.isCorrect ? 'correct' : 'incorrect'}`}>
+                        <div className="question-header">
+                            <strong>Question {i + 1}: {q.question}</strong>
+                            <span>{result.isCorrect ? '✅ Correct' : '❌ Incorrect'}</span>
+                        </div>
+                         <div className="answer-line">
+                            <span>Your answer:</span>
+                            <strong>
+                                {renderAnswerText(result.userAnswer, q.type)}
+                            </strong>
+                        </div>
+                         {!result.isCorrect && (
+                            <div className="answer-line">
+                               <span>Correct answer:</span>
+                                <strong>
+                                    {renderAnswerText(q.answer, q.type)}
+                                </strong>
+                           </div>
+                        )}
+                        
+                        <div className="ai-professor">
+                            <button onClick={() => getAiHelp(i, 'hint')} disabled={isLoading[`hint-${i}`]}>
+                                {isLoading[`hint-${i}`] ? <div className="mini-spinner"></div> : 'Get Hint'}
+                            </button>
+                             <button onClick={() => getAiHelp(i, 'explanation')} disabled={isLoading[`explanation-${i}`]}>
+                                {isLoading[`explanation-${i}`] ? <div className="mini-spinner"></div> : 'Explain Answer'}
+                            </button>
+                        </div>
+                        {hint[i] && <div className="hint-content fade-in">{hint[i]}</div>}
+                        {explanation[i] && (
+                            <>
+                                <div className="explanation-content fade-in">{explanation[i]}</div>
+                                {sources[i] && (
+                                    <div className="explanation-sources fade-in">
+                                        <h4>Sources from Google Search</h4>
+                                        <ul>
+                                            {(sources[i] || []).map((source, idx) => (
+                                                source.web && <li key={idx}><a href={source.web.uri} target="_blank" rel="noopener noreferrer">{source.web.title || source.web.uri}</a></li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
+
+
+const QuizPaperView = ({ quiz, onBack }) => {
+    const [showAnswers, setShowAnswers] = useState(false);
+    return (
+        <div className="generated-quiz-view content-card animate-in">
             <div className="quiz-actions-header no-print">
-                 <button onClick={onBack} className="back-btn">
-                    <span role="img" aria-label="back">⬅️</span> Back
-                </button>
-                 <div className="actions-right">
+                <button onClick={onBack} className="back-btn"><i className="fas fa-arrow-left"></i> Back to Generator</button>
+                <div className="actions-right">
                     <label className="toggle-answers">
-                        Show Answers
+                        <span>Show Answers</span>
                         <input type="checkbox" checked={showAnswers} onChange={() => setShowAnswers(!showAnswers)} />
                         <span className="slider"></span>
                     </label>
-                    <button onClick={handlePrint} className="print-btn">
-                         <span role="img" aria-label="print">🖨️</span> Print
-                    </button>
+                    <button onClick={() => window.print()} className="print-btn"><i className="fas fa-print"></i> Print</button>
                 </div>
             </div>
-
-            <div className="quiz-paper" id="quiz-to-print">
+            <div className="quiz-paper">
                 <div className="quiz-paper-header">
-                    <h1>{quiz.topic}</h1>
+                    <h1>{quiz.topic} Quiz</h1>
                     <div className="quiz-meta">
-                        <span><strong>Difficulty:</strong> {quiz.difficulty}</span>
-                        <span><strong>Questions:</strong> {quiz.questions.length}</span>
+                        <span>Name: _________________________</span>
+                        <span>Date: _________________________</span>
+                        <span>Score: ______ / {quiz.questions.length}</span>
                     </div>
                 </div>
 
-                {quiz.questions.map((q, index) => (
-                    <div key={index} className="quiz-paper-section">
-                        <div className="quiz-question-card">
-                            <p><strong>Question {index + 1}:</strong> {q.question}</p>
-                            {q.type === 'Multiple-Choice' || q.type === 'Scenario-Based' ? (
-                                <ol className="mc-options" type="A">
-                                    {q.options.map((opt, i) => <li key={i}>{opt}</li>)}
-                                </ol>
-                            ) : q.type === 'True/False' ? (
-                                <p><strong>(True / False)</strong></p>
-                            ) : q.type === 'Fill-in-the-Blank' ? (
-                                <p>Answer: <span className="fill-blank-space"></span></p>
-                            ) : q.type === 'Match the Pairs' ? (
-                               <div className="match-display">
-                                   <div className="match-column-display">
-                                       <strong>Premises</strong>
-                                       <ul>
-                                           {q.premises.map((p, i) => <li key={i}>{i+1}. {p}</li>)}
-                                       </ul>
-                                   </div>
+                <div className="quiz-paper-section">
+                    {quiz.questions.map((q, index) => (
+                        <div key={index} className="quiz-question-card">
+                            <p><strong>{index + 1}. {q.question}</strong></p>
+                            {q.type === 'Multiple-Choice' && (
+                                <ul className="mc-options">
+                                    {(q.options || []).map((opt, i) => <li key={i}>{opt}</li>)}
+                                </ul>
+                            )}
+                            {q.type === 'Fill-in-the-Blank' && <p>Answer: <span className="fill-blank-space"></span></p>}
+                            {q.type === 'True/False' && <p>Answer: True / False</p>}
+                            {q.type === 'Match the Pairs' && (
+                                <div className="match-display">
                                     <div className="match-column-display">
-                                       <strong>Options</strong>
-                                       <ul>
-                                           {q.options.map((o, i) => <li key={i}>{String.fromCharCode(65 + i)}. {o}</li>)}
-                                       </ul>
-                                   </div>
-                               </div>
-                            ) : q.type === 'Ordering' ? (
-                                <>
+                                        <strong>Column A</strong>
+                                        <ul>{(q.premises || []).map((p, i) => <li key={i}>{i+1}. {p}</li>)}</ul>
+                                    </div>
+                                    <div className="match-column-display">
+                                        <strong>Column B</strong>
+                                         <ul>{(q.options || []).map((o, i) => <li key={i}>{String.fromCharCode(65 + i)}. {o}</li>)}</ul>
+                                    </div>
+                                </div>
+                            )}
+                            {q.type === 'Ordering' && (
+                                <div>
                                     <p><em>Order the following items:</em></p>
-                                    <ul>
-                                        {q.items.map((item, i) => <li key={i}>{item}</li>)}
-                                    </ul>
-                                    <br/>
-                                    {[...Array(q.items.length)].map((_, i) => (
-                                        <p key={i}>{i+1}. <span className="fill-blank-space" style={{width: '300px'}}></span></p>
-                                    ))}
-                                </>
-                            ) : null}
+                                    <ul>{(q.items || []).map((item, i) => <li key={i}>{item}</li>)}</ul>
+                                </div>
+                            )}
+                            {q.type === 'Image-Based' && (
+                                <p className="image-prompt-note">
+                                    <em>(Instructor: Generate an image using the prompt: "{q.imagePrompt}")</em>
+                                </p>
+                            )}
                         </div>
-                    </div>
-                ))}
-                
+                    ))}
+                </div>
+
                 <div className={`answer-key-section ${showAnswers ? 'visible' : ''}`}>
                     <h3>Answer Key</h3>
                     {quiz.questions.map((q, index) => (
                          <div key={index} className="answer-card">
-                             <p><strong>Question {index + 1}:</strong> 
-                                {q.type === 'Match the Pairs' 
-                                    ? <ul>{Object.entries(q.answer).map(([key, val]) => <li key={key}>{key}: {val as string}</li>)}</ul>
-                                    : q.type === 'Ordering'
-                                    ? <ol>{(q.answer as string[]).map((item, i) => <li key={i}>{item}</li>)}</ol>
-                                    : ` ${q.answer}`
-                                }
-                             </p>
-                         </div>
+                            <p><strong>{index + 1}.</strong> {Array.isArray(q.answer) ? q.answer.join(', ') : typeof q.answer === 'object' ? JSON.stringify(q.answer) : q.answer}</p>
+                        </div>
                     ))}
                 </div>
             </div>
@@ -1356,306 +1754,349 @@ const QuizPaperView = ({ quiz, onBack }) => {
     );
 };
 
-
-const AboutContactPage = ({ parseMarkdown }) => {
-    const [formState, setFormState] = useState({ name: '', email: '', message: '' });
-    const [isSubmitting, setIsSubmitting] = useState(false);
-    const [submitSuccess, setSubmitSuccess] = useState(false);
-
-    const handleInputChange = (e) => {
-        const { name, value } = e.target;
-        setFormState(prev => ({ ...prev, [name]: value }));
-    };
-
-    const handleFormSubmit = (e) => {
-        e.preventDefault();
-        setIsSubmitting(true);
-        // Mock submission
-        setTimeout(() => {
-            setIsSubmitting(false);
-            setSubmitSuccess(true);
-            setFormState({ name: '', email: '', message: '' });
-            setTimeout(() => setSubmitSuccess(false), 5000);
-        }, 1500);
-    };
+const PrivacyPolicyModal = ({ isOpen, onClose }) => {
+    if (!isOpen) return null;
 
     return (
-        <div className="about-contact-page page-container">
-            <div className="content-card about-section animate-in">
-                <h2>About NexusLearn AI</h2>
-                <p className="mission-statement">
-                    NexusLearn AI is dedicated to revolutionizing cybersecurity education by leveraging the power of artificial intelligence. Our mission is to provide adaptive, engaging, and highly-relevant learning experiences for cybersecurity professionals at all levels, from aspiring analysts to seasoned experts.
-                </p>
-                <div className="founder-profile">
-                    <h3>Meet the Creator</h3>
-                    <CreatorProfile />
+        <div className="modal-backdrop" onClick={onClose}>
+            <div className="modal-content animate-in" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <h3>Privacy Policy</h3>
+                    <button onClick={onClose} className="close-btn" aria-label="Close Privacy Policy">&times;</button>
                 </div>
-                <div className="testimonials-section">
-                    <h3>What Our Users Say</h3>
-                    <Testimonials />
-                </div>
-            </div>
+                <div className="modal-body">
+                    <h4>1. Information We Collect</h4>
+                    <p>This application operates entirely client-side. We do not collect, store, or transmit any personal data, including your name, quiz topics, or generated content. All operations are processed within your browser.</p>
+                    
+                    <h4>2. API Usage</h4>
+                    <p>The application interacts with the Google Gemini API to generate content. The API key is managed by the execution environment and is not stored or logged by this application. All API requests are made directly from your browser to Google's servers. Please refer to Google's API Privacy Policy for information on how they handle data.</p>
 
-            <div className="content-card contact-section animate-in" style={{ animationDelay: '0.2s' }}>
-                <h2>Get In Touch</h2>
-                <p>Have questions, feedback, or partnership inquiries? Reach out to us!</p>
-                <div className="contact-layout">
-                    <form onSubmit={handleFormSubmit} style={{ flex: 2 }}>
-                        <div className="form-group">
-                            <label htmlFor="name">Your Name</label>
-                            <input type="text" id="name" name="name" value={formState.name} onChange={handleInputChange} required />
-                        </div>
-                        <div className="form-group">
-                            <label htmlFor="email">Your Email</label>
-                            <input type="email" id="email" name="email" value={formState.email} onChange={handleInputChange} required />
-                        </div>
-                        <div className="form-group">
-                            <label htmlFor="message">Message</label>
-                            <textarea id="message" name="message" value={formState.message} onChange={handleInputChange} required></textarea>
-                        </div>
-                        <button type="submit" disabled={isSubmitting}>
-                            {isSubmitting ? <><div className="mini-spinner"></div> Sending...</> : "Send Message"}
-                        </button>
-                        {submitSuccess && <p className="form-success-msg">Thank you for your message! We'll get back to you shortly.</p>}
-                    </form>
-                    <div style={{ flex: 1 }}>
-                        <ContactInfo />
-                    </div>
+                    <h4>3. Use of Local Storage</h4>
+                    <p>We may use your browser's local storage to save application settings, such as your preferred theme (light/dark), for your convenience. This data is stored only on your device and is not accessible by us.</p>
+                    
+                    <h4>4. No Cookies or Tracking</h4>
+                    <p>NexusLearn AI does not use cookies or any other third-party tracking technologies for analytics or advertising purposes.</p>
+
+                    <h4>5. Changes to This Policy</h4>
+                    <p>We may update this Privacy Policy from time to time. Any changes will be reflected on this page. This policy is effective as of {new Date().getFullYear()}.</p>
                 </div>
             </div>
         </div>
     );
 };
 
+const Header = ({ currentView, setView, theme, toggleTheme }) => (
+    <header className="eco-header">
+        <a href="#" className="rotating-logo-container" onClick={() => setView('generator')} aria-label="NexusLearn AI Home">
+            <svg className="rotating-logo-svg" viewBox="0 0 100 100">
+                <path id="circlePath" fill="none" d="M 10, 50 a 40,40 0 1,1 80,0 a 40,40 0 1,1 -80,0" />
+                <text className="logo-text-path">
+                    <textPath href="#circlePath">NEXUSLEARN AI • CYBERSECURITY TRAINING • </textPath>
+                </text>
+            </svg>
+            <i className="fas fa-brain logo-icon-center"></i>
+        </a>
+        <nav className="site-nav">
+             <button onClick={() => setView('generator')} className={`nav-link ${currentView.startsWith('generator') ? 'active' : ''}`}>Generator</button>
+             <button onClick={() => setView('about')} className={`nav-link ${currentView === 'about' ? 'active' : ''}`}>About</button>
+        </nav>
+        <div className="header-controls">
+            <div className="theme-switch-wrapper">
+                <label className="theme-switch" htmlFor="theme-toggle">
+                    <input type="checkbox" id="theme-toggle" onChange={toggleTheme} checked={theme === 'light'} />
+                    <span className="slider round"></span>
+                </label>
+            </div>
+             <div className="user-profile" title="User Profile">NL</div>
+        </div>
+    </header>
+);
+
+const Footer = ({ setView, handleNavigateToContact, openPrivacyModal }) => (
+    <footer className="site-footer">
+        <div className="footer-content">
+            <div className="footer-section">
+                <div className="footer-logo-container rotating-logo-container">
+                     <svg className="rotating-logo-svg" viewBox="0 0 100 100">
+                        <path id="footerCirclePath" fill="none" d="M 10, 50 a 40,40 0 1,1 80,0 a 40,40 0 1,1 -80,0" />
+                        <text className="logo-text-path">
+                            <textPath href="#footerCirclePath">NEXUSLEARN AI • CYBERSECURITY TRAINING • </textPath>
+                        </text>
+                    </svg>
+                    <i className="fas fa-brain logo-icon-center"></i>
+                </div>
+                <p>Empowering the next generation of cybersecurity experts with AI-driven, adaptive learning.</p>
+            </div>
+            <div className="footer-section">
+                <h3>Quick Links</h3>
+                <ul>
+                    <li><a href="#" onClick={(e) => { e.preventDefault(); setView('generator'); }}>Home</a></li>
+                    <li><a href="#contact" onClick={(e) => { e.preventDefault(); handleNavigateToContact(); }}>Contact</a></li>
+                    <li><a href="#" onClick={(e) => { e.preventDefault(); openPrivacyModal(); }}>Privacy Policy</a></li>
+                </ul>
+            </div>
+             <div className="footer-section">
+                <h3>Follow Us</h3>
+                <p>Stay updated with the latest in cybersecurity education.</p>
+                <div className="social-icons">
+                    <a href="#" aria-label="LinkedIn Profile" target="_blank" rel="noopener noreferrer"><i className="fab fa-linkedin"></i></a>
+                    <a href="#" aria-label="GitHub Repository" target="_blank" rel="noopener noreferrer"><i className="fab fa-github"></i></a>
+                    <a href="#" aria-label="Twitter Page" target="_blank" rel="noopener noreferrer"><i className="fab fa-twitter"></i></a>
+                </div>
+            </div>
+        </div>
+        <div className="footer-bottom">
+            &copy; {new Date().getFullYear()} NexusLearn AI. All Rights Reserved.
+        </div>
+    </footer>
+);
+
 
 const App = () => {
-    const [activePage, setActivePage] = useState('generator');
+    const [theme, setTheme] = useState('dark');
+    const [view, setView] = useState('generator');
     const [quiz, setQuiz] = useState(null);
-    const [isGenerating, setIsGenerating] = useState(false);
-    const [currentView, setCurrentView] = useState('generator'); // generator, quiz-paper, exam
-    const [userName, setUserName] = useState("Cyber Pro");
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState(null);
+    const [userAnswers, setUserAnswers] = useState(null);
+    const [examResults, setExamResults] = useState(null);
+    const [userName, setUserName] = useState('Cyber Defender');
     const [isChatbotOpen, setIsChatbotOpen] = useState(false);
-    const [apiError, setApiError] = useState(null);
-    const audioContextRef = useRef(null);
-    const [audioStates, setAudioStates] = useState({}); // { [text]: { isLoading, isPlaying, source } }
+    const [learningMode, setLearningMode] = useState('quiz'); // 'quiz' or 'quest'
+    const [quest, setQuest] = useState(null);
+    const [isPrivacyModalOpen, setIsPrivacyModalOpen] = useState(false);
+    const [scrollToContactFlag, setScrollToContactFlag] = useState(false);
 
     useEffect(() => {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-    }, []);
-    
-     useEffect(() => {
-        if (apiError) {
-            const timer = setTimeout(() => {
-                setApiError(null);
-            }, 8000); // Hide error after 8 seconds
-            return () => clearTimeout(timer);
-        }
-    }, [apiError]);
+        document.body.className = theme;
+    }, [theme]);
 
-
-    const handleApiError = (error) => {
-        let message = 'An unexpected error occurred with the AI service.';
-        if (error.message) {
-            // Basic attempt to find a useful message
-             if (error.message.includes('API key not valid')) {
-                message = 'The provided API key is not valid. Please check your configuration.';
-            } else if (error.message.includes('429')) {
-                message = 'You have exceeded your API quota. Please check your usage and billing or try again later.';
-            } else if (error.message.includes('500') || error.message.includes('503')) {
-                message = 'The AI service is currently unavailable. Please try again later.';
-            } else {
-                 message = error.message.length < 150 ? error.message : "An error occurred. Check the console for details.";
+    useEffect(() => {
+        if (view === 'about' && scrollToContactFlag) {
+            const contactSection = document.getElementById('contact');
+            if (contactSection) {
+                contactSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }
+            setScrollToContactFlag(false);
         }
-        setApiError(message);
-        console.error("Detailed API Error:", error);
+    }, [view, scrollToContactFlag]);
+
+    const handleNavigateToContact = () => {
+        setView('about');
+        setScrollToContactFlag(true);
     };
 
+    const toggleTheme = () => {
+        setTheme(theme === 'dark' ? 'light' : 'dark');
+    };
+    
+    const handleApiError = (e) => {
+        const message = e.message || "An unexpected error occurred. Please try again.";
+        console.error("API Error caught by handler:", e);
+        setError(message);
+        setTimeout(() => setError(null), 7000); // Auto-dismiss error after 7 seconds
+    };
 
     const handleQuizGenerated = (generatedQuiz) => {
         setQuiz(generatedQuiz);
-        setCurrentView('quiz-paper');
-        setIsGenerating(false);
+        setView('exam_start');
     };
     
-    const handleStartExam = () => {
-        setCurrentView('exam');
+    const handleQuestGenerated = (generatedQuest) => {
+        setQuest(generatedQuest);
+        setView('quest_view');
     };
 
-    const handleBackToGenerator = () => {
-        setQuiz(null);
-        setCurrentView('generator');
-    };
-    
-     const handleRetryQuiz = (newQuiz) => {
-        setQuiz(newQuiz);
-        setCurrentView('exam');
-    };
-
-    const handleNavClick = (page) => {
-        setActivePage(page);
+    const handleStartExam = (name) => {
+        setUserName(name);
+        setExamResults(null);
+        setUserAnswers(Array(quiz.questions.length).fill(null));
+        setView('exam');
     };
     
-    const parseMarkdown = (text) => {
-        if(!text) return '';
-        // A simple markdown parser
-        return text
-            .replace(/\*\*\*(.*?)\*\*\*/g, '<h3>$1</h3>') // Bold-italic for h3
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') // Bold
-            .replace(/\*(.*?)\*/g, '<em>$1</em>')       // Italic
-            .replace(/### (.*)/g, '<h3>$1</h3>')       // H3
-            .replace(/## (.*)/g, '<h2>$1</h2>')         // H2
-            .replace(/# (.*)/g, '<h1>$1</h1>')          // H1
-            .replace(/- (.*)/g, '<li>$1</li>')         // List items
-            .replace(/(\<li\>.*\<\/li\>)/g, '<ul>$1</ul>') // Wrap lists
-            .replace(/\n/g, '<br />');                  // Newlines
+    const handleQuestComplete = () => {
+        setQuest(null);
+        setLearningMode('quiz'); // Or back to quest generator
+        setView('generator');
     };
-    
-    const handlePlayAudio = async (text) => {
-        const currentAudio = audioStates[text];
 
-        if (currentAudio?.isPlaying) {
-            currentAudio.source.stop();
-            setAudioStates(prev => ({ ...prev, [text]: { ...prev[text], isPlaying: false } }));
-            return;
-        }
+    const handleSubmitExam = (finalAnswers) => {
+        setUserAnswers(finalAnswers);
+        let correctCount = 0;
+        const detailedResults = quiz.questions.map((q, i) => {
+            let isCorrect = false;
+            if (q.type === 'Ordering') {
+                isCorrect = JSON.stringify(finalAnswers[i]) === JSON.stringify(q.answer);
+            } else if (q.type === 'Match the Pairs') {
+                const userAnswerObj = finalAnswers[i];
+                if (!userAnswerObj || typeof userAnswerObj !== 'object') {
+                    isCorrect = false;
+                } else {
+                    try {
+                        const correctAnswerObj = JSON.parse(q.answer as string);
+                        const correctKeys = Object.keys(correctAnswerObj);
+                        const userKeys = Object.keys(userAnswerObj);
 
-        setAudioStates(prev => ({ ...prev, [text]: { isLoading: true, isPlaying: false } }));
-
-        try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            const response = await ai.models.generateContent({
-                model: "gemini-2.5-flash-preview-tts",
-                contents: [{ parts: [{ text: text }] }],
-                config: {
-                    responseModalities: [Modality.AUDIO],
-                    speechConfig: {
-                        voiceConfig: {
-                            prebuiltVoiceConfig: { voiceName: 'Kore' },
-                        },
-                    },
-                },
-            });
-
-            const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-            if (!base64Audio) throw new Error("No audio data received.");
-
-            const audioBuffer = await decodeAudioData(
-                decode(base64Audio),
-                audioContextRef.current,
-                24000,
-                1
-            );
-
-            const source = audioContextRef.current.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioContextRef.current.destination);
-            source.start();
+                        if (correctKeys.length !== userKeys.length) {
+                             isCorrect = false;
+                        } else {
+                            isCorrect = correctKeys.every(key => correctAnswerObj[key] === userAnswerObj[key]);
+                        }
+                    } catch (e) {
+                        console.error("Failed to parse correct answer for Match the Pairs:", q.answer);
+                        isCorrect = false;
+                    }
+                }
+            }
+            else {
+                 isCorrect = finalAnswers[i]?.toString().toLowerCase() === q.answer.toString().toLowerCase();
+            }
             
-            source.onended = () => {
-                setAudioStates(prev => ({ ...prev, [text]: { ...prev[text], isPlaying: false, source: null } }));
-            };
+            if (isCorrect) correctCount++;
+            return { question: q.question, userAnswer: finalAnswers[i], correctAnswer: q.answer, isCorrect };
+        });
 
-            setAudioStates(prev => ({ ...prev, [text]: { isLoading: false, isPlaying: true, source } }));
-        } catch (error) {
-            console.error('TTS Error:', error);
-            handleApiError(error);
-            setAudioStates(prev => ({ ...prev, [text]: { isLoading: false, isPlaying: false } }));
+        setExamResults({
+            score: Math.round((correctCount / quiz.questions.length) * 100),
+            correct: correctCount,
+            incorrect: quiz.questions.length - correctCount,
+            total: quiz.questions.length,
+            detailed: detailedResults,
+        });
+        setView('results');
+    };
+
+    const handleRetry = () => {
+        setView('exam_start');
+    };
+    
+    const handleRetryIncorrect = () => {
+        const incorrectQuestions = quiz.questions.filter((q, i) => !examResults.detailed[i].isCorrect);
+        const incorrectQuiz = { topic: `${quiz.topic} (Incorrect Questions)`, questions: incorrectQuestions };
+        setQuiz(incorrectQuiz);
+        setView('exam_start');
+    };
+    
+    const handleNewQuiz = () => {
+        setQuiz(null);
+        setExamResults(null);
+        setView('generator');
+    };
+    
+    const handleDownloadCertificate = () => {
+        const certElement = document.getElementById('certificate');
+        if (certElement) {
+             html2canvas(certElement, {
+                scale: 3, // Higher scale for better resolution
+                useCORS: true,
+                backgroundColor: null, // Use element's background
+            }).then(canvas => {
+                const link = document.createElement('a');
+                link.download = `Certificate_${userName}_${quiz.topic.replace(/\s+/g, '_')}.png`;
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+            });
         }
     };
 
-    const renderPage = () => {
-        switch(activePage) {
-            case 'generator':
+
+    const renderContent = () => {
+        switch(view) {
+            case 'exam_start':
                 return (
-                    <div className="generator-view">
-                        <QuizGenerator 
-                            onQuizGenerated={handleQuizGenerated} 
-                            isGenerating={isGenerating} 
-                            handleApiError={handleApiError} 
-                        />
-                        {isGenerating ? <QuizSkeleton /> : quiz ? (
-                            currentView === 'quiz-paper' ? 
-                                <QuizPaperView quiz={quiz} onBack={handleBackToGenerator} /> :
-                                <ExamView 
-                                    quiz={quiz} 
-                                    onBack={handleBackToGenerator} 
-                                    onFinish={handleRetryQuiz}
-                                    userName={userName}
-                                    audioStates={audioStates}
-                                    handlePlayAudio={handlePlayAudio}
-                                    handleApiError={handleApiError}
-                                    parseMarkdown={parseMarkdown}
-                                />
-                        ) : <QuizPlaceholder />}
+                     <div className="exam-intro content-card animate-in">
+                        <h2>Ready for your assessment?</h2>
+                        <p>You have generated a quiz on <strong>{quiz.topic}</strong> with {quiz.questions.length} questions.</p>
+                        <form onSubmit={(e) => { e.preventDefault(); handleStartExam(userName); }} className="start-exam-form">
+                            <div className="form-group">
+                                <label htmlFor="userName">Enter Your Name</label>
+                                <input type="text" id="userName" value={userName} onChange={(e) => setUserName(e.target.value)} required />
+                            </div>
+                            <button type="submit">Start Exam</button>
+                        </form>
                     </div>
                 );
+            case 'exam':
+                return <ExamView quiz={quiz} onSubmit={handleSubmitExam} onBack={handleNewQuiz} userName={userName} />;
+            case 'results':
+                return <ExamResults 
+                    results={examResults} 
+                    quiz={quiz} 
+                    onRetry={handleRetry} 
+                    onRetryIncorrect={handleRetryIncorrect}
+                    onNewQuiz={handleNewQuiz}
+                    onViewCertificate={() => setView('certificate')}
+                    handleApiError={handleApiError}
+                />;
+            case 'paper':
+                return <QuizPaperView quiz={quiz} onBack={handleNewQuiz} />;
             case 'about':
-                return <AboutContactPage parseMarkdown={parseMarkdown} />;
+                return <AboutPage />;
+            case 'certificate': {
+                const certificateTitle = examResults?.score === 100 ? "Certificate of Mastery" : "Certificate of Achievement";
+                return <Certificate title={certificateTitle} name={userName} topic={quiz.topic} onDownload={handleDownloadCertificate} handleApiError={handleApiError} />;
+            }
+            case 'quest_view':
+                return <ChallengeQuestView quest={quest} onComplete={handleQuestComplete} onBack={handleNewQuiz} handleApiError={handleApiError} />;
+            case 'generator':
             default:
-                return null;
+                return (
+                     <div className="generator-view">
+                         <div className="mode-switcher no-print">
+                            <button 
+                                className={`mode-tab ${learningMode === 'quiz' ? 'active' : ''}`}
+                                onClick={() => setLearningMode('quiz')}>
+                                Quiz Generator
+                            </button>
+                            <button 
+                                className={`mode-tab ${learningMode === 'quest' ? 'active' : ''}`}
+                                onClick={() => setLearningMode('quest')}>
+                                Challenge Quest
+                            </button>
+                        </div>
+                        <div className="content-card animate-in">
+                        {learningMode === 'quiz' ? 
+                            <QuizGenerator onQuizGenerated={handleQuizGenerated} handleApiError={handleApiError} /> :
+                            <ChallengeQuestGenerator onQuestGenerated={handleQuestGenerated} handleApiError={handleApiError} />
+                        }
+                        </div>
+                        <div className="quiz-container-placeholder">
+                             {isLoading ? <QuizSkeleton /> : 
+                             (<>
+                                 <i className="fas fa-tasks" style={{fontSize: '4rem', opacity: '0.3', marginBottom: '1rem'}}></i>
+                                 <h3>Your Custom Learning Experience Awaits</h3>
+                                 <p>Configure your desired {learningMode} on the left and let our AI create a tailored challenge for you.</p>
+                            </>)
+                             }
+                        </div>
+                    </div>
+                );
         }
     };
-    
-    const Footer = () => (
-        <footer className="site-footer no-print">
-            <div className="footer-content">
-                <div className="footer-section" style={{textAlign: 'center'}}>
-                     <RotatingLogo containerClass="footer-logo-container"/>
-                </div>
-                <div className="footer-section">
-                    <h3>Quick Links</h3>
-                    <ul>
-                        <li><a href="#" onClick={(e) => { e.preventDefault(); handleNavClick('generator'); }}>Quiz Generator</a></li>
-                        <li><a href="#" onClick={(e) => { e.preventDefault(); handleNavClick('about'); }}>About Us</a></li>
-                        <li><a href="#" onClick={(e) => { e.preventDefault(); handleNavClick('about'); }}>Contact</a></li>
-                    </ul>
-                </div>
-                 <div className="footer-section">
-                    <h3>Legal</h3>
-                    <ul>
-                        <li><a href="#">Terms of Service</a></li>
-                        <li><a href="#">Privacy Policy</a></li>
-                    </ul>
-                </div>
-                 <div className="footer-section">
-                    <h3>Connect</h3>
-                    <p>Follow the developer for updates and insights.</p>
-                     <div className="social-icons">
-                        <a href="https://github.com/nwaforchibu" target="_blank" rel="noopener noreferrer" aria-label="GitHub"><i className="fab fa-github"></i></a>
-                        <a href="https://www.linkedin.com/in/chibuzor-nwaiwu-430930269/" target="_blank" rel="noopener noreferrer" aria-label="LinkedIn"><i className="fab fa-linkedin"></i></a>
-                        <a href="https://x.com/Sir_Iyke_N" target="_blank" rel="noopener noreferrer" aria-label="Twitter"><i className="fab fa-twitter"></i></a>
-                    </div>
-                </div>
-            </div>
-            <div className="footer-bottom">
-                &copy; {new Date().getFullYear()} NexusLearn AI. All Rights Reserved.
-            </div>
-        </footer>
-    );
 
     return (
         <>
-            <Header onNavClick={handleNavClick} activePage={activePage} userName={userName} />
+            <Header currentView={view} setView={setView} theme={theme} toggleTheme={toggleTheme} />
             <main>
-                {renderPage()}
-            </main>
-            <Footer />
-            {apiError && (
-                 <div className="error-banner">
-                    <p>{apiError}</p>
-                    <button onClick={() => setApiError(null)} className="error-banner-close">&times;</button>
+                <div className="page-container">
+                    {error && (
+                         <div className="error-banner" role="alert">
+                            <div className="error-banner-content">
+                                <i className="fas fa-exclamation-circle error-banner-icon"></i>
+                                <p>{error}</p>
+                            </div>
+                            <button onClick={() => setError(null)} className="error-banner-close" aria-label="Close">&times;</button>
+                        </div>
+                    )}
+                    {renderContent()}
                 </div>
-            )}
-            <button className="chatbot-fab" onClick={() => setIsChatbotOpen(!isChatbotOpen)} aria-label="Open AI Assistant">
-                {isChatbotOpen ? '✕' : '💬'}
+            </main>
+             <button className="chatbot-fab" onClick={() => setIsChatbotOpen(true)} aria-label="Open AI Expert Chatbot">
+                <i className="fas fa-hat-wizard"></i>
             </button>
-            <Chatbot 
-                isOpen={isChatbotOpen} 
-                onClose={() => setIsChatbotOpen(false)} 
-                parseMarkdown={parseMarkdown}
-                handleApiError={handleApiError}
-            />
+            <CyberExpertChatbot isOpen={isChatbotOpen} onClose={() => setIsChatbotOpen(false)} handleApiError={handleApiError} />
+            <PrivacyPolicyModal isOpen={isPrivacyModalOpen} onClose={() => setIsPrivacyModalOpen(false)} />
+            <Footer setView={setView} handleNavigateToContact={handleNavigateToContact} openPrivacyModal={() => setIsPrivacyModalOpen(true)} />
         </>
     );
 };
